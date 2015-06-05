@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 #!-*- coding: utf-8 -*-
 
 from __future__ import print_function, division
@@ -11,11 +11,16 @@ from MPBST import RegressionSampler
 
 class LMMSampler(RegressionSampler):
 
+    def __init__(self, record_best = True, cl_mode == False, cl_device = None):
+        """Initialize the class.
+        """
+        RegressionSampler.__init__(self, record_best, cl_mode, cl_device)
+       
     def do_inference(self, output_file=None):
-        RegressionSampler.do_inference(self, output_file)
+        
 
 
+    
 lmm = LMMSampler(record_best = True, cl_mode = False)
 lmm.read_csv('./data/10group-100n.csv.gz')
-lmm.do_inference()
 print(lmm.obs)
