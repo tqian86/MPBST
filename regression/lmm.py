@@ -72,7 +72,7 @@ class LMMSampler(RegressionSampler):
                 X.columns = ['_'.join(colname.split('_')[1:]) for colname in Beta.index]
                 for g in self.group_values.iterkeys():
                     for gv in self.group_values[g]:
-                        X.at[self.obs[g] == gv, X.columns.str.contains('.*%s(?!%s$)' % (g, gv))] = 0
+                        X.at[self.obs[g] == gv, X.columns.to_series().str.contains('.*%s(?!%s$)' % (g, gv))] = 0
             
             # calculate the old loglikelihood - this can be reused
             log_g_old = - (1 / (2 * self.params.loc[iter-1, 'sigma2'])) * \
