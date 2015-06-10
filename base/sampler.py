@@ -45,7 +45,7 @@ def print_matrix_in_row(npmat, file_dest):
 
 class BaseSampler(object):
 
-    def __init__(self, record_best, cl_mode, cl_device = None):
+    def __init__(self, record_best, cl_mode, cl_device = None, niter=1000):
         """Initialize the class.
         """
         if cl_mode:
@@ -76,7 +76,7 @@ class BaseSampler(object):
 
         self.cl_mode = cl_mode
         self.obs = []
-        self.niter = 1000
+        self.niter = niter
         self.thining = 1
         self.burnin = 0
         self.N = 0 # number of data points

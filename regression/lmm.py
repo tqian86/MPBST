@@ -8,21 +8,20 @@ pkg_dir = os.path.dirname(os.path.realpath(__file__)) + '/../../'
 sys.path.append(pkg_dir)
 
 from MPBST import *
-from scipy.stats import t
 
 class LMMSampler(RegressionSampler):
 
-    def __init__(self, record_best = True, cl_mode = False, cl_device = None):
+    def __init__(self, record_best = True, cl_mode = False, cl_device = None, niter = 1000):
         """Initialize the class.
         """
-        RegressionSampler.__init__(self, record_best, cl_mode, cl_device)
+        RegressionSampler.__init__(self, record_best, cl_mode, cl_device, niter)
         self.outcome = None
         self.outcome_obs = None
         self.predictors = []
         self.group_values = {}
         self.predictor_groups = {}
         self.params = pd.DataFrame(1.0, index = range(self.niter), columns = ['sigma2'])
-        self.proposal_sd = .1
+        self.proposal_sd = .025
         
     def set_fixed(self, outcome, predictors):
         """Set the regression model in terms of a univariate outcome
@@ -75,7 +74,7 @@ class LMMSampler(RegressionSampler):
                         X.at[self.obs[g] == gv, X.columns.to_series().str.contains('.*%s(?!%s$)' % (g, gv))] = 0
             
             # calculate the old loglikelihood - this can be reused
-            log_g_old = - (1 / (2 * self.params.loc[iter-1, 'sigma2'])) * \
+            log_g_old = - (1 / (2 * self.params.at[iter-1, 'sigma2'])) * \
                          np.sum((self.outcome_obs - np.dot(X, Beta)) ** 2)
 
             # Infer the fixed effects.
@@ -89,7 +88,7 @@ class LMMSampler(RegressionSampler):
             for p, groups in self.predictor_groups.iteritems():
                 for g in groups:
                     for gv in self.group_values[g]:
-                        self._infer_random_beta(p, g, gv, iter, Beta, X, output_file)
+                        self._infer_random_beta(p, g, gv, iter, Beta, X, log_g_old,  output_file)
 
                     self._infer_random_sigma2(p, g, iter, Beta, X, output_file)
 
@@ -106,7 +105,7 @@ class LMMSampler(RegressionSampler):
         
         # modify the beta value and calculate the new loglikelihood
         Beta.at['beta_%s' % p] = new_beta
-        log_g_new += - (1 / (2 * self.params.loc[iter-1, 'sigma2'])) * \
+        log_g_new += - (1 / (2 * self.params.at[iter-1, 'sigma2'])) * \
                      np.sum((self.outcome_obs - np.dot(X, Beta)) ** 2)
 
         # compute candidate densities q for old and new beta
@@ -134,26 +133,21 @@ class LMMSampler(RegressionSampler):
         beta_n = beta_0 + 0.5 * np.sum((self.outcome_obs - np.dot(X, Beta)) ** 2)
         self.params.at[iter, 'sigma2'] = 1 / np.random.gamma(alpha_n, 1 / beta_n)
 
-    def _infer_random_beta(self, p, g, gv, iter, Beta, X, output_file = None):
+    def _infer_random_beta(self, p, g, gv, iter, Beta, X, log_g_old, output_file = None):
         """Infer the beta coefficient of a fixed effect that has random effects.
         """
-        proposal_sd = .025
+        proposal_sd = .01
         old_beta = Beta.loc['beta_%s_%s%s' % (p, g, gv)]
         new_beta = random.gauss(mu = old_beta, sigma = proposal_sd)
 
-        # set up to calculate the g densities for both the old and new beta values
-        log_g_old = 0 #-1 * old_beta # which is np.log(np.exp(-1 * old_beta))
-        log_g_new = 0 #-1 * new_beta # similar as above
-
-        log_g_old += - (1 / (2 * self.params.loc[iter-1, 'sigma2'])) * \
-                     np.sum((self.outcome_obs[self.obs[g] == gv] - np.dot(X[self.obs[g] == gv], Beta)) ** 2)
-        log_g_old += - (1 / (2 * self.params.loc[iter-1, 'sigma2_{0}_{1}'.format(p, g)])) * old_beta ** 2
+        # prior is the expectation that beta ~ N(0, sigma2_g)
+        log_g_old += - (1 / (2 * self.params.at[iter-1, 'sigma2_{0}_{1}'.format(p, g)])) * old_beta ** 2
+        log_g_new = - (1 / (2 * self.params.at[iter-1, 'sigma2_{0}_{1}'.format(p, g)])) * new_beta ** 2
         
         # modify the beta value and calculate the new loglikelihood
         Beta.loc['beta_%s_%s%s' % (p, g, gv)] = new_beta
-        log_g_new += - (1 / (2 * self.params.loc[iter-1, 'sigma2'])) * \
-                     np.sum((self.outcome_obs[self.obs[g] == gv] - np.dot(X[self.obs[g] == gv], Beta)) ** 2)
-        log_g_new += - (1 / (2 * self.params.loc[iter-1, 'sigma2_{0}_{1}'.format(p, g)])) * new_beta ** 2
+        log_g_new += - (1 / (2 * self.params.at[iter-1, 'sigma2'])) * \
+                     ((self.outcome_obs - np.dot(X, Beta)) ** 2).sum()
 
         # compute candidate densities q for old and new beta
         # since the proposal distribution is normal this step is not needed
@@ -181,7 +175,7 @@ class LMMSampler(RegressionSampler):
         self.params.at[iter, 'sigma2_{0}_{1}'.format(p, g)] = 1 / np.random.gamma(alpha_n, 1 / beta_n)
         
         
-lmm = LMMSampler(record_best = True, cl_mode = False)
+lmm = LMMSampler(record_best = True, cl_mode = False, niter=5000)
 lmm.read_csv('./data/10group-100n.csv')
 lmm.set_fixed(outcome = 'y', predictors = [1, 'x1', 'x2'])
 lmm.set_random(ranef_dict = {'group': ['x1', 'x2']})
