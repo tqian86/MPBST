@@ -165,3 +165,5 @@ class RegressionSampler(BaseSampler):
         self.obs = pd.read_csv(filepath)
         self.obs.loc[:,'1'] = 1
         self.N = self.obs.shape[0]
+
+        
