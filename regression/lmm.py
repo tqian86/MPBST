@@ -77,8 +77,8 @@ class LMMSampler(RegressionSampler):
         """Perform inference on the parameters.
         """
         # construct an X matrix that would readily multiple with all coefficients
-        beta_coef_names = self.params.filter(regex = '^beta').columns
-        self.X = copy.deepcopy(self.obs.filter(items=[colname.split('_')[1] for colname in beta_coef_names]))
+        beta_coef_names = [_ for _ in self.params.columns if 'beta' in _]
+        self.X = copy.deepcopy(self.obs[[colname.split('_')[1] for colname in beta_coef_names]])
         self.X.columns = ['_'.join(colname.split('_')[1:]) for colname in beta_coef_names]
         # set cells not corresponding to the appropriate groups to 0
         for g in self.group_values.iterkeys():
@@ -88,14 +88,12 @@ class LMMSampler(RegressionSampler):
         begin_time = time()
         if self.cl_mode:
             for iter in xrange(1, self.niter):
-
-                Beta = copy.deepcopy(self.params.filter(regex = '^beta')).loc[iter-1]
+                Beta = self.params.iloc[iter-1][beta_coef_names]
                 d_Beta = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = np.array(Beta).astype(np.float32))
 
                 if self.d_X is None:
                     self.d_X = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = np.array(self.X, dtype = np.float32, order='C'))
-
-                
+               
                 resid2 = np.empty(shape = self.N, dtype=np.float32)
                 d_resid2 = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR, hostbuf = resid2)
                 self.cl_prg.resid_squares(self.queue, (self.N,), None,
@@ -125,8 +123,7 @@ class LMMSampler(RegressionSampler):
         else:
             for iter in xrange(1, self.niter):
             
-                Beta = copy.deepcopy(self.params.filter(regex = '^beta')).loc[iter-1]
-            
+                Beta = self.params.iloc[iter-1][beta_coef_names]
                 # calculate the old loglikelihood - this can be reused
                 log_g_old = - (1 / (2 * self.params.at[iter-1, 'sigma2'])) * \
                             np.sum((self.outcome_obs - np.dot(self.X, Beta)) ** 2)
@@ -190,7 +187,6 @@ class LMMSampler(RegressionSampler):
             return False
 
     def _cl_infer_fixed_beta(self, iter, Beta, d_Beta, log_g_old):
-        gpu_begin_time = time()
         old_fixed_Beta = np.array([Beta.at['beta_%s' % p] for p in self.predictors], dtype=np.float32)
         new_fixed_Beta = np.random.normal(old_fixed_Beta, scale=0.05).astype(np.float32)
         rand = np.random.random(size = new_fixed_Beta.shape).astype(np.float32)
@@ -205,11 +201,10 @@ class LMMSampler(RegressionSampler):
                                      np.int32(self.X.shape[1]), np.int32(self.N),
                                      np.float32(log_g_old), np.float32(self.params.at[iter-1, 'sigma2']))
         cl.enqueue_copy(self.queue, change, d_change)
-        self.gpu_time += time() - gpu_begin_time
                 
         for i in xrange(new_fixed_Beta.shape[0]):
-            if change[i] == 1: self.params.loc[iter, 'beta_%s' % self.predictors[i]] = new_fixed_Beta[i]
-            else: self.params.loc[iter, 'beta_%s' % self.predictors[i]] = old_fixed_Beta[i]
+            if change[i] == 1: self.params.set_value(iter, 'beta_%s' % self.predictors[i],  new_fixed_Beta[i])
+            else: self.params.set_value(iter, 'beta_%s' % self.predictors[i], old_fixed_Beta[i])
         
     def _infer_sigma2(self, iter, Beta, X, output_file = None):
         """Infer the variance of the overall multi-level model.
@@ -234,7 +229,7 @@ class LMMSampler(RegressionSampler):
         cl.enqueue_copy(self.queue, resid2, d_resid2)
         
         beta_n = beta_0 + 0.5 * resid2.sum()
-        self.params.at[iter, 'sigma2'] = 1 / np.random.gamma(alpha_n, 1 / beta_n)
+        self.params.set_value(iter, 'sigma2', 1 / np.random.gamma(alpha_n, 1 / beta_n))
         
     def _infer_random_beta(self, p, g, gv, iter, Beta, X, log_g_old, output_file = None):
         """Infer the beta coefficient of a fixed effect that has random effects.
@@ -248,7 +243,6 @@ class LMMSampler(RegressionSampler):
         # prior is the expectation that beta ~ N(0, sigma2_g)
         log_g_old += - (1 / (2 * sigma2_eff)) * old_beta ** 2
         log_g_new = - (1 / (2 * sigma2_eff)) * new_beta ** 2
-        
         
         # modify the beta value and calculate the new loglikelihood
         Beta_temp.loc['beta_%s_%s%s' % (p, g, gv)] = new_beta
@@ -282,6 +276,7 @@ class LMMSampler(RegressionSampler):
             
         rand = np.random.random(size = new_random_Beta.shape).astype(np.float32)
         change = np.empty(shape = new_random_Beta.shape, dtype = np.int32)
+        self.gpu_time += time() - gpu_begin_time
 
         d_old_random_Beta = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = np.array(old_random_Beta, dtype=np.float32))
         d_new_random_Beta = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = new_random_Beta)
@@ -296,27 +291,24 @@ class LMMSampler(RegressionSampler):
                                       np.int32(self.X.shape[1]), np.int32(self.N), np.int32(len(self.predictors)),
                                       np.float32(log_g_old), np.float32(self.params.at[iter-1, 'sigma2']))
         cl.enqueue_copy(self.queue, change, d_change)
-        self.gpu_time += time() - gpu_begin_time
                 
         for i in xrange(new_random_Beta.shape[0]):
-            if change[i] == 1: self.params.loc[iter, old_random_Beta.index[i]] = new_random_Beta[i]
-            else: self.params.loc[iter, old_random_Beta.index[i]] = old_random_Beta[i]
+            if change[i] == 1: self.params.set_value(iter, old_random_Beta.index[i], new_random_Beta[i])
+            else: self.params.set_value(iter, old_random_Beta.index[i], old_random_Beta[i])
 
     def _infer_random_sigma2(self, p, g, iter, Beta, X, output_file = None):
         """Infer the variance of sub-level  models.
         """
         alpha_0 = 1
         beta_0 = 1
-        n = self.params.filter(regex='beta_{0}_{1}.+$'.format(p, g)).shape[1]
+        n = ['beta_{0}_{1}'.format(p, g) in _ for _ in list(self.params.columns)].count(True)
         alpha_n = alpha_0 + n / 2
-        beta_n = beta_0 + 0.5 * np.sum((self.params.filter(regex='beta_{0}_{1}'.format(p, g)).loc[iter-1] - 0) ** 2)
-        self.params.at[iter, 'sigma2_{0}_{1}'.format(p, g)] = 1 / np.random.gamma(alpha_n, 1 / beta_n)
-
+        beta_n = beta_0 + 0.5 * ((self.params.filter(regex='beta_{0}_{1}'.format(p, g)).loc[iter-1] - 0) ** 2).sum()
+        self.params.set_value(iter, 'sigma2_{0}_{1}'.format(p, g), 1 / np.random.gamma(alpha_n, 1 / beta_n))
 
     def _logprob(self, sample):
         """Calculate the loglikelihood of data given a sample.
         """
-        
         Beta = copy.deepcopy(sample.filter(regex = '^beta'))
         logprob =  - self.N / 2 * np.log(2 * math.pi * sample['sigma2']) + \
                    (- ((self.outcome_obs - np.dot(self.X, Beta)) ** 2).sum() / (2 * sample['sigma2']))
