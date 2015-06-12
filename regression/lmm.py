@@ -225,7 +225,7 @@ class LMMSampler(RegressionSampler):
         resid2 = np.empty(shape = self.X.shape[0], dtype=np.float32)
         d_resid2 = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR, hostbuf = resid2)
         self.cl_prg.resid_squares(self.queue, (self.N,), None,
-                                      self.d_outcome_obs, self.d_X, d_Beta, d_resid2, np.int32(Beta.shape[0]))
+                                  self.d_outcome_obs, self.d_X, d_Beta, d_resid2, np.int32(Beta.shape[0]))
         cl.enqueue_copy(self.queue, resid2, d_resid2)
         
         beta_n = beta_0 + 0.5 * resid2.sum()
@@ -272,8 +272,7 @@ class LMMSampler(RegressionSampler):
         group = copy.deepcopy(old_random_Beta)
         sigma2_group = self.params.loc[iter].filter(regex = 'sigma2_\w+_\w+$')
         for i in xrange(len(sigma2_group.index)):
-            group[group.index.to_series().str.contains(sigma2_group.index[i].replace('sigma2_', ''))] = i
-            
+            group[[group.index.get_loc(_) for _ in group.index if sigma2_group.index[i].replace('sigma2_', '') in _]] = i
         rand = np.random.random(size = new_random_Beta.shape).astype(np.float32)
         change = np.empty(shape = new_random_Beta.shape, dtype = np.int32)
         self.gpu_time += time() - gpu_begin_time
@@ -301,22 +300,24 @@ class LMMSampler(RegressionSampler):
         """
         alpha_0 = 1
         beta_0 = 1
-        n = ['beta_{0}_{1}'.format(p, g) in _ for _ in list(self.params.columns)].count(True)
+        n = len(self.group_values[g])# ['beta_{0}_{1}'.format(p, g) in _ for _ in Beta.index].count(True)
         alpha_n = alpha_0 + n / 2
-        beta_n = beta_0 + 0.5 * ((self.params.filter(regex='beta_{0}_{1}'.format(p, g)).loc[iter-1] - 0) ** 2).sum()
+        beta_n = beta_0 + 0.5 * ((Beta.filter(regex='beta_{0}_{1}'.format(p, g))- 0) ** 2).sum()
         self.params.set_value(iter, 'sigma2_{0}_{1}'.format(p, g), 1 / np.random.gamma(alpha_n, 1 / beta_n))
 
     def _logprob(self, sample):
         """Calculate the loglikelihood of data given a sample.
         """
-        Beta = copy.deepcopy(sample.filter(regex = '^beta'))
+        Beta = sample[[_ for _ in sample.index if 'beta' in _]]
         logprob =  - self.N / 2 * np.log(2 * math.pi * sample['sigma2']) + \
                    (- ((self.outcome_obs - np.dot(self.X, Beta)) ** 2).sum() / (2 * sample['sigma2']))
         for p, groups in self.predictor_groups.iteritems():
             for g in groups:
-                n = sample.filter(regex='beta_{0}_{1}.+$'.format(p, g)).shape[0]
-                logprob += - n / 2 * np.log(2 * math.pi * sample['sigma2_{0}_{1}'.format(p, g)]) + \
-                           (- ((sample.filter(regex='beta_{0}_{1}'.format(p, g)) - 0) ** 2).sum() / (2 * sample['sigma2_{0}_{1}'.format(p, g)]))
+                random_Beta = sample.filter(regex='beta_{0}_{1}.+$'.format(p, g))
+                sigma2 = sample['sigma2_{0}_{1}'.format(p, g)]
+                n = random_Beta.shape[0]
+                logprob += - n / 2 * np.log(2 * math.pi * sigma2) + \
+                           (- ((random_Beta - 0) ** 2).sum() / (2 * sigma2))
         return logprob
         
         
