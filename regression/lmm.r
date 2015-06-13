@@ -7,7 +7,7 @@ lmm <- function(formula, data, niter = 1000) {
     require(data.table)
     # convert the data to data.table as well
     data = data.table(data)
-    
+
     # process the formula
     f.terms = terms(formula)
     f.vars = attr(f.terms, "variables")
@@ -33,11 +33,12 @@ lmm <- function(formula, data, niter = 1000) {
 
     for (i in 2:niter) {
         inferFixedBeta(samples, data, i, fixed.vars = fixed, outcome = outcome)
+        inferSigma2(samples, data, i, fixed.vars = fixed, outcome = outcome)
     }
     samples
 }
 
-inferFixedBeta <- function(samples, data, iter, fixed.vars, outcome, proposal.sd = 0.05) {
+inferFixedBetaMH <- function(samples, data, iter, fixed.vars, outcome, proposal.sd = 0.05) {
     sigma2 = as.numeric(samples[iter-1, 'sigma2', with=F])
     outcome.obs = data[, outcome, with=F]
     X = as.matrix(data[, fixed.vars, with=F])
@@ -47,23 +48,47 @@ inferFixedBeta <- function(samples, data, iter, fixed.vars, outcome, proposal.sd
         v = fixed.vars[vi]
         old.beta = as.numeric(Beta[,v,with=F])
         new.beta = rnorm(1, mean = old.beta, sd = proposal.sd)
-        
+
         # calculate the old loglikelihood
         log.g.old = - (1 / (2 * sigma2)) *
             sum((outcome.obs - X %*% t(Beta)) ** 2)
-       
+
         # modify the beta value and calculate the new loglikelihood
         Beta[, eval(v):= new.beta]
         log.g.new = - (1 / (2 * sigma2)) *
             sum((outcome.obs - X %*% t(Beta)) ** 2)
-        
+
         # compute candidate densities q for old and new beta
         # since the proposal distribution is normal this step is not needed
         log.q.old = 0
-        log.q.new = 0 
-        
+        log.q.new = 0
+
         # compute the moving probability
         moving.logprob = (log.g.new + log.q.old) - (log.g.old + log.q.new)
         samples[iter, eval(v) := ifelse(logrand[vi] < moving.logprob, new.beta, old.beta)]
     }
+}
+
+inferFixedBeta <- function(samples, data, iter, fixed.vars, outcome, proposal.sd = 0.05) {
+    sigma2 = as.numeric(samples[iter-1, 'sigma2', with=F])
+    outcome.obs = as.matrix(data[, outcome, with=F])
+    X = as.matrix(data[, fixed.vars, with=F])
+    Beta = samples[iter-1, fixed.vars, with=F]
+
+    Mu = solve(t(X) %*% X) %*% t(X) %*% outcome.obs
+    Sigma = sigma2 * solve(t(X) %*% X)
+    require(MASS)
+    samples[iter, eval(fixed.vars) := as.list(mvrnorm(1, Mu, Sigma))]
+
+}
+
+inferSigma2 <- function(samples, data, iter, fixed.vars, outcome) {
+    alpha_0 = 1
+    beta_0 = 1
+    alpha_n = alpha_0 + nrow(data) / 2
+    outcome.obs = as.matrix(data[, outcome, with=F])
+    X = as.matrix(data[, fixed.vars, with=F])
+    Beta = as.matrix(samples[iter-1, fixed.vars, with=F])
+    beta_n = beta_0 + 0.5 * sum((outcome.obs - X %*% t(Beta)) ** 2)
+    samples[iter, 'sigma2' := 1 / rgamma(1, shape = alpha_n, scale = 1 / beta_n)]
 }
