@@ -14,23 +14,25 @@ lmm <- function(formula, data, niter = 1000) {
     if (attr(f.terms, "response") == 1) {
         outcome = as.character(f.vars[[2]])
     }
-    intercept = attr(f.terms, "intercept")
+    has.intercept = attr(f.terms, "intercept")
     fixed = grep("[|]", attr(f.terms, "term.labels"), value=T, invert=T)
+    random = grep("[|]", attr(f.terms, "term.labels"), value=T)
+
+    print(random)
 
     # create the results matrix for storing samples
     samples = as.data.table(
         matrix(0,
                nrow = niter,
-               ncol = intercept + length(fixed))
+               ncol = has.intercept + length(fixed))
     )
-    if (intercept == 1) {
+    if (has.intercept == 1) {
         fixed = c('Intercept', fixed)
         data[, Intercept := 1]
     }
     setnames(samples, 1:ncol(samples), fixed)
     samples[, "sigma2" := 1]
-    samples[1, x1 := 0.25]
-
+    return(samples)
     for (i in 2:niter) {
         inferFixedBeta(samples, data, i, fixed.vars = fixed, outcome = outcome)
         inferSigma2(samples, data, i, fixed.vars = fixed, outcome = outcome)
@@ -73,7 +75,7 @@ inferFixedBeta <- function(samples, data, iter, fixed.vars, outcome, proposal.sd
     sigma2 = as.numeric(samples[iter-1, 'sigma2', with=F])
     outcome.obs = as.matrix(data[, outcome, with=F])
     X = as.matrix(data[, fixed.vars, with=F])
-    Beta = samples[iter-1, fixed.vars, with=F]
+    fixed.Beta = samples[iter-1, fixed.vars, with=F]
 
     Mu = solve(t(X) %*% X) %*% t(X) %*% outcome.obs
     Sigma = sigma2 * solve(t(X) %*% X)
