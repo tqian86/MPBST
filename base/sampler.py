@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 #-*- coding: utf-8 -*-
 
-from __future__ import print_function
+from __future__ import print_function, division
 import numpy as np
 import pandas as pd
 import sys, copy, random, math, csv, gzip, mimetypes, os.path
@@ -35,6 +35,47 @@ def sample(a, p):
         if total > r:
             return a[i]
     return a[i]
+
+def multivariate_t(mu, Sigma, df, size=None):
+    '''
+    Output:
+    Produce size samples of d-dimensional multivariate t distribution
+    Input:
+    mu = mean (d dimensional numpy array or scalar)
+    Sigma = scale matrix (dxd numpy array)
+    df = degrees of freedom
+    size = # of samples to produce
+    '''
+    d = len(Sigma)
+    Z = np.random.multivariate_normal(np.zeros(d), Sigma, size)
+    g = np.repeat(np.random.gamma(df/2, 2/df, size), d).reshape(Z.shape)
+    return mu + Z/np.sqrt(g)
+
+
+def wishart(df, Sigma, size=None):
+
+    dim = len(Sigma)
+    Z = np.random.multivariate_normal(np.zeros(dim), Sigma, df)
+    return Z.T.dot(Z)
+
+def sample_wishart(sigma, df):
+    '''
+    Returns a sample from the Wishart distn, conjugate prior for precision matrices.
+    '''
+    
+    n = sigma.shape[0]
+    chol = np.linalg.cholesky(sigma)
+    
+    # use matlab's heuristic for choosing between the two different sampling schemes
+    if (df <= 81+n) and (df == round(df)):
+    # direct
+        X = np.dot(chol,np.random.normal(size=(n,df)))
+    else:
+        A = np.diag(np.sqrt(np.random.chisquare(df - np.arange(0,n),size=n)))
+        A[np.tri(n,k=-1,dtype=bool)] = np.random.normal(size=(n*(n-1)/2.))
+        X = np.dot(chol,A)
+        
+    return np.dot(X,X.T)
 
 def print_matrix_in_row(npmat, file_dest):
     """Print a matrix in a row.
