@@ -31,6 +31,7 @@ class HMMSampler(BaseSampler):
         self.data = pd.read_csv(filepath, compression = 'gzip')
         self.obs = self.data[obsvar_names]
         self.N = self.data.shape[0]
+        #self.states = np.random.randint(low = 1, high = 2, size = self.N)#self.num_states + 1, size = self.N)
         self.states = np.random.randint(low = 1, high = self.num_states + 1, size = self.N)
 
 class GaussianHMMSampler(HMMSampler):
@@ -59,11 +60,13 @@ class GaussianHMMSampler(HMMSampler):
         """
         for i in xrange(self.niter):
             self._infer_means_covs(output_file)
+            print('Means:\n', self.means)
+            print('Covs:\n', self.covs)
             self._infer_states(output_file)
+            print('States:\n', self.states)
             self._infer_transp(output_file)
             print('Transitional matrix:\n', self.trans_p_matrix)
-            print('Means:\n', self.means)
-            print('States:\n', self.states)
+            #raw_input()
         return
 
     def _infer_states(self, output_file):
@@ -91,10 +94,11 @@ class GaussianHMMSampler(HMMSampler):
                     
                 emit_logp = multivariate_normal.logpdf(self.obs.iloc[nth], mean = self.means[state-1], cov = self.covs[state-1])
                 state_logp_grid[state - 1] = trans_prev_logp + trans_next_logp + emit_logp
+                #state_logp_grid[state - 1] = trans_prev_logp + emit_logp
 
             # resample state
             self.states[nth] = sample(a = self.uniq_states, p = lognormalize(state_logp_grid))
-            
+            #print('sampled:', self.states[nth])
         return
 
     def _infer_means_covs(self, output_file):
@@ -104,10 +108,13 @@ class GaussianHMMSampler(HMMSampler):
             # get observations currently assigned to this state
             cluster_obs = np.array(self.obs.iloc[np.where(self.states == state)])
             n = cluster_obs.shape[0]
-            if n == 0: continue
-            
+
             # compute sufficient statistics
-            mu = cluster_obs.mean()
+            if n == 0:
+                mu = np.zeros((self.dim, 1))
+            else:
+                mu = cluster_obs.mean()
+                
             obs_deviance = cluster_obs - mu
             mu0_deviance = np.reshape(mu - self.gaussian_mu0, (1, self.dim))
             cov_obs = np.dot(obs_deviance.T, obs_deviance)
@@ -126,9 +133,14 @@ class GaussianHMMSampler(HMMSampler):
             new_mu = multivariate_t(mu = mu_n, Sigma = Sigma, df = df)
             self.means[state-1] = new_mu
             # resample the covariance matrix
-            new_cov = np.linalg.inv(wishart(Sigma = Sigma, df = v_n))
+            new_cov = np.linalg.inv(sample_wishart(sigma = np.linalg.inv(T_n), df = v_n))
+            #new_cov = wishart(Sigma = Sigma, df = v_n)
             self.covs[state-1] = new_cov
-            
+
+        # a hacky way to alleviate label switching
+        reindex = self.means[:,0].argsort()
+        self.means = self.means[reindex]
+        self.covs = self.covs[reindex]
         return
 
     def _infer_transp(self, output_file):
@@ -139,7 +151,7 @@ class GaussianHMMSampler(HMMSampler):
             pairs = zip(self.states[:self.N-1], self.states[1:])
             count_from_state = (self.states[:self.N-1] == state_from).sum()
             for state_to in self.uniq_states:
-                count_p[state_to - 1] = pairs.count((state_from, state_to)) / count_from_state
+                count_p[state_to - 1] = (pairs.count((state_from, state_to)) + 1) / (count_from_state + self.num_states)
                 
             self.trans_p_matrix[state_from-1] = count_p
         return
