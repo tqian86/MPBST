@@ -60,21 +60,26 @@ class GaussianHMMSampler(HMMSampler):
         """
         for i in xrange(self.niter):
             self._infer_means_covs(output_file)
-            print('Means:\n', self.means)
-            print('Covs:\n', self.covs)
             self._infer_states(output_file)
-            print('States:\n', self.states)
-            self._infer_transp(output_file)
-            print('Transitional matrix:\n', self.trans_p_matrix)
-            #raw_input()
+            self._infer_trans_p(output_file)
+        print('Means:\n', self.means)
+        print('Covs:\n', self.covs)
+        print('States:\n', self.states)
+        print('Transitional matrix:\n', self.trans_p_matrix)
         return
 
     def _infer_states(self, output_file):
         """Infer the state of each observation without OpenCL.
         """
+        # set up sampling grid, which can be reused
+        state_logp_grid = np.empty(shape = self.num_states)
+
+        # emission probabilities can be calculated in one pass
+        emit_logp = np.empty((self.num_states, self.N))
+        for state in self.uniq_states:
+            emit_logp[state-1] = multivariate_normal.logpdf(self.obs, mean = self.means[state-1], cov = self.covs[state-1])
+        
         for nth in xrange(self.N):
-            # set up sampling grid
-            state_logp_grid = np.empty(shape = self.num_states)
             
             # loop over states
             for state in self.uniq_states:
@@ -92,13 +97,10 @@ class GaussianHMMSampler(HMMSampler):
                     next_state = self.states[nth + 1]
                     trans_next_logp = np.log(self.trans_p_matrix[state-1, next_state-1])
                     
-                emit_logp = multivariate_normal.logpdf(self.obs.iloc[nth], mean = self.means[state-1], cov = self.covs[state-1])
-                state_logp_grid[state - 1] = trans_prev_logp + trans_next_logp + emit_logp
-                #state_logp_grid[state - 1] = trans_prev_logp + emit_logp
+                state_logp_grid[state - 1] = trans_prev_logp + trans_next_logp + emit_logp[state-1, nth]
 
             # resample state
             self.states[nth] = sample(a = self.uniq_states, p = lognormalize(state_logp_grid))
-            #print('sampled:', self.states[nth])
         return
 
     def _infer_means_covs(self, output_file):
@@ -143,12 +145,15 @@ class GaussianHMMSampler(HMMSampler):
         self.covs = self.covs[reindex]
         return
 
-    def _infer_transp(self, output_file):
+    def _infer_trans_p(self, output_file):
         """Infer the transitional probabilities betweenn states without OpenCL.
         """
+        # set up the sampling grid, which can be reused
+        count_p = np.empty(self.num_states)
+        # make bigram pairs for easier counting
+        pairs = zip(self.states[:self.N-1], self.states[1:])
+
         for state_from in self.uniq_states:
-            count_p = np.empty(self.num_states)
-            pairs = zip(self.states[:self.N-1], self.states[1:])
             count_from_state = (self.states[:self.N-1] == state_from).sum()
             for state_to in self.uniq_states:
                 count_p[state_to - 1] = (pairs.count((state_from, state_to)) + 1) / (count_from_state + self.num_states)
@@ -156,6 +161,6 @@ class GaussianHMMSampler(HMMSampler):
             self.trans_p_matrix[state_from-1] = count_p
         return
 
-hs = GaussianHMMSampler(num_states = 2)
+hs = GaussianHMMSampler(num_states = 2, niter = 1000)
 hs.read_csv('./toydata/speed.csv.gz', obsvar_names = ['rt'])
 hs.do_inference()
