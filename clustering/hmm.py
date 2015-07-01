@@ -135,8 +135,7 @@ class GaussianHMMSampler(HMMSampler):
             new_mu = multivariate_t(mu = mu_n, Sigma = Sigma, df = df)
             self.means[state-1] = new_mu
             # resample the covariance matrix
-            new_cov = np.linalg.inv(sample_wishart(sigma = np.linalg.inv(T_n), df = v_n))
-            #new_cov = wishart(Sigma = Sigma, df = v_n)
+            new_cov = np.linalg.inv(wishart(Sigma = np.linalg.inv(T_n), df = v_n))
             self.covs[state-1] = new_cov
 
         # a hacky way to alleviate label switching
