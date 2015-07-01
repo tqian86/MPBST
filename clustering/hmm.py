@@ -9,6 +9,7 @@ sys.path.append(pkg_dir)
 
 from MPBST import *
 
+import itertools
 import numpy as np
 from scipy.stats import multivariate_normal
 
@@ -28,10 +29,13 @@ class HMMSampler(BaseSampler):
     def read_csv(self, filepath, obsvar_names = ['obs'], header = True):
         """Read data from a csv file and check for observations.
         """
+        self.source_filepath = filepath
+        self.source_dirname = os.path.dirname(filepath) + '/'
+        self.source_filename = os.path.basename(filepath).split('.')[0]
+        
         self.data = pd.read_csv(filepath, compression = 'gzip')
         self.obs = self.data[obsvar_names]
         self.N = self.data.shape[0]
-        #self.states = np.random.randint(low = 1, high = 2, size = self.N)#self.num_states + 1, size = self.N)
         self.states = np.random.randint(low = 1, high = self.num_states + 1, size = self.N)
 
 class GaussianHMMSampler(HMMSampler):
@@ -49,26 +53,34 @@ class GaussianHMMSampler(HMMSampler):
         self.means = np.zeros((self.num_states, self.dim)) # the mean vector of each state
         self.covs = np.array([np.eye(self.dim) for _ in xrange(self.num_states)]) # the covariance matrix of each state
         
-        self.gaussian_mu0 = np.zeros(self.dim)
+        self.gaussian_mu0 = np.zeros((1, self.dim))
         self.gaussian_k0 = 1
 
         self.wishart_T0 = np.eye(self.dim)
         self.wishart_v0 = 1
         
-    def do_inference(self, output_file = None):
+    def do_inference(self, output_folder = None):
         """Perform inference on parameters.
         """
-        for i in xrange(self.niter):
-            self._infer_means_covs(output_file)
-            self._infer_states(output_file)
-            self._infer_trans_p(output_file)
-        print('Means:\n', self.means)
-        print('Covs:\n', self.covs)
-        print('States:\n', self.states)
-        print('Transitional matrix:\n', self.trans_p_matrix)
+        if output_folder is None:
+            output_folder = self.source_dirname
+        else:
+            output_folder += '/'
+
+        self.sample_fp = gzip.open(output_folder + '{0}-gaussian-hmm-state-means-covs.csv.gz'.format(self.source_filename), 'w')
+
+        for i in xrange(1, self.niter+1):
+            self._infer_means_covs()
+            self._infer_states(output_folder)
+            self._infer_trans_p(output_folder)
+            self._save_sample(iteration = i)
+        #print('Means:\n', self.means)
+        #print('Covs:\n', self.covs)
+        #print('States:\n', self.states)
+        #print('Transitional matrix:\n', self.trans_p_matrix)
         return
 
-    def _infer_states(self, output_file):
+    def _infer_states(self, output_folder):
         """Infer the state of each observation without OpenCL.
         """
         # set up sampling grid, which can be reused
@@ -103,7 +115,7 @@ class GaussianHMMSampler(HMMSampler):
             self.states[nth] = sample(a = self.uniq_states, p = lognormalize(state_logp_grid))
         return
 
-    def _infer_means_covs(self, output_file):
+    def _infer_means_covs(self):
         """Infer the means of each hidden state without OpenCL.
         """
         for state in self.uniq_states:
@@ -113,12 +125,13 @@ class GaussianHMMSampler(HMMSampler):
 
             # compute sufficient statistics
             if n == 0:
-                mu = np.zeros((self.dim, 1))
+                mu = np.zeros(self.dim)
+                cluster_obs = np.zeros((1, self.dim))
             else:
-                mu = cluster_obs.mean()
-                
+                mu = cluster_obs.mean(axis = 0)
+
             obs_deviance = cluster_obs - mu
-            mu0_deviance = np.reshape(mu - self.gaussian_mu0, (1, self.dim))
+            mu0_deviance = mu - self.gaussian_mu0
             cov_obs = np.dot(obs_deviance.T, obs_deviance)
             cov_mu0 = np.dot(mu0_deviance.T, mu0_deviance)
 
@@ -144,7 +157,27 @@ class GaussianHMMSampler(HMMSampler):
         self.covs = self.covs[reindex]
         return
 
-    def _infer_trans_p(self, output_file):
+    def _save_sample(self, iteration):
+        """Save the means and covariance matrices from the current iteration.
+        """
+        if iteration == 1:
+            header = ['iteration', 'dimension', 'state'] + ['mu_{0:d}'.format(_) for _ in range(1, self.dim+1)]
+            header += ['cov_{0:d}_{1:d}'.format(*_) for _ in itertools.product(*[range(1, self.dim+1)] * 2)]
+            header += ['trans_p_to_{0:d}'.format(_) for _ in self.uniq_states]
+            header += ['has_obs_{0:d}'.format(_) for _ in range(1, self.N + 1)]
+            print(*header, sep = ',', file = self.sample_fp)
+
+        if self.record_best:
+            pass
+        else:
+            for state in self.uniq_states:
+                row = [iteration, self.dim, state] + list(self.means[state-1]) + list(np.ravel(self.covs[state-1])) + list(np.ravel(self.trans_p_matrix[state-1]))
+                row += list((self.states == state).astype(np.bool).astype(np.int0))
+                print(*row, sep = ',', file = self.sample_fp)
+                
+        return
+    
+    def _infer_trans_p(self, output_folder):
         """Infer the transitional probabilities betweenn states without OpenCL.
         """
         # set up the sampling grid, which can be reused
@@ -160,6 +193,6 @@ class GaussianHMMSampler(HMMSampler):
             self.trans_p_matrix[state_from-1] = count_p
         return
 
-hs = GaussianHMMSampler(num_states = 2, niter = 1000)
+hs = GaussianHMMSampler(num_states = 2, niter = 1000, record_best = False)
 hs.read_csv('./toydata/speed.csv.gz', obsvar_names = ['rt'])
 hs.do_inference()
