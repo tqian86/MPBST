@@ -44,6 +44,11 @@ class GaussianHMMSampler(HMMSampler):
         """Initialize the base HMM sampler.
         """
         HMMSampler.__init__(self, num_states, record_best, cl_mode, cl_device, niter)
+
+        if cl_mode:
+            program_str = open(pkg_dir + 'MPBST/regression/kernels/gaussian_hmm_cl.c', 'r').read()
+            self.cl_prg = cl.Program(self.ctx, program_str).build()
+            self.d_X, self.d_outcome_obs = None, None
         
     def read_csv(self, filepath, obsvar_names = ['obs'], header = True):
         """Read data from a csv file and check for observations.
@@ -69,17 +74,23 @@ class GaussianHMMSampler(HMMSampler):
 
         self.sample_fp = gzip.open(output_folder + '{0}-gaussian-hmm-state-means-covs.csv.gz'.format(self.source_filename), 'w')
 
-        for i in xrange(1, self.niter+1):
-            self._infer_means_covs()
-            #self._infer_states_one_pass()
-            self._infer_trans_p()
-            self._infer_states()
-            self._save_sample(iteration = i)
-        #print('Means:\n', self.means)
-        #print('Covs:\n', self.covs)
-        #print('States:\n', self.states)
-        #print('Transitional matrix:\n', self.trans_p_matrix)
-        return
+        begin_time = time()
+        if self.cl_mode:
+            for i in xrange(1, self.niter+1):
+                self._cl_infer_means_covs()
+                self._cl_infer_trans_p()
+                self._cl_infer_states()
+            self._cl_save_sample(iteration = i)            
+        else:
+            for i in xrange(1, self.niter+1):
+                self._infer_means_covs()
+                self._infer_trans_p()
+                self._infer_states()
+                self._save_sample(iteration = i)
+                
+        self.total_time += time() - begin_time
+        
+        return self.gpu_time, self.total_time
 
     def _infer_states(self):
         """Infer the state of each observation without OpenCL.
