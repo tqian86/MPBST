@@ -27,6 +27,10 @@ def lognormalize(x):
 def sample(a, p):
     """Step sample from a discrete distribution using CDF
     """
+    if (len(a) != len(p)):
+        raise Exception('a != p')
+    p = np.array(p)
+    p = p / p.sum()
     n = len(a)
     r = random.random()
     total = 0           # range: [0,1]
