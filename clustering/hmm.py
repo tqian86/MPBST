@@ -38,6 +38,12 @@ class HMMSampler(BaseSampler):
         self.N = self.data.shape[0]
         self.states = np.random.randint(low = 1, high = self.num_states + 1, size = self.N)
 
+        if self.cl_mode:
+            self.d_obs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+                                   hostbuf = np.array(self.obs, dtype=np.float32, order='C'))
+            self.d_states = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR,
+                                      hostbuf = self.states.astype(np.int32))
+        
 class GaussianHMMSampler(HMMSampler):
 
     def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None, niter = 1000):
@@ -46,7 +52,7 @@ class GaussianHMMSampler(HMMSampler):
         HMMSampler.__init__(self, num_states, record_best, cl_mode, cl_device, niter)
 
         if cl_mode:
-            program_str = open(pkg_dir + 'MPBST/regression/kernels/gaussian_hmm_cl.c', 'r').read()
+            program_str = open(pkg_dir + 'MPBST/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
             self.d_X, self.d_outcome_obs = None, None
         
@@ -63,7 +69,7 @@ class GaussianHMMSampler(HMMSampler):
 
         self.wishart_T0 = np.eye(self.dim)
         self.wishart_v0 = 1
-        
+
     def do_inference(self, output_folder = None):
         """Perform inference on parameters.
         """
@@ -77,10 +83,10 @@ class GaussianHMMSampler(HMMSampler):
         begin_time = time()
         if self.cl_mode:
             for i in xrange(1, self.niter+1):
-                self._cl_infer_means_covs()
-                self._cl_infer_trans_p()
+                self._infer_means_covs()
+                self._infer_trans_p()
                 self._cl_infer_states()
-            self._cl_save_sample(iteration = i)            
+                self._save_sample(iteration = i)            
         else:
             for i in xrange(1, self.niter+1):
                 self._infer_means_covs()
@@ -99,18 +105,13 @@ class GaussianHMMSampler(HMMSampler):
         new_states = np.empty_like(self.states)
         new_states[:] = self.states[:]
         
-        # both state and emission probabilities can be calculated in one pass
+        # emission probabilities can be calculated in one pass
         state_logp = np.empty((self.num_states, self.N))
         emit_logp = np.empty((self.num_states, self.N))
         for state in self.uniq_states:
-
-            #trans_prev_logp = np.concatenate(([1 / self.num_states], self.trans_p_matrix[self.states[:(self.N - 1)] - 1, state-1]))
-            #trans_next_logp = np.concatenate((self.trans_p_matrix[state-1, self.states[1:] - 1].T, [1]))
-            #state_logp[state-1] = np.log(trans_prev_logp) + np.log(trans_next_logp)
             emit_logp[state-1] = multivariate_normal.logpdf(self.obs, mean = self.means[state-1], cov = self.covs[state-1])
 
-        #state_logp = np.log(state_logp / state_logp.sum(axis = 0))
-            
+        # state probabilities need to be interated over
         for nth in xrange(self.N):
             
             # loop over states
@@ -136,7 +137,59 @@ class GaussianHMMSampler(HMMSampler):
 
         self.states[:] = new_states[:]
         return self.states
-        
+
+    def _cl_infer_states(self):
+        """Infer the state of each observation without OpenCL.
+        """
+        # emission probabilities can be calculated in one pass
+        state_logp = np.empty((self.N, self.num_states))
+        emit_logp = np.empty((self.N, self.num_states), dtype=np.float32)
+
+        d_means = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = self.means.astype(np.float32))
+        d_cov_dets = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+                               hostbuf = np.linalg.det(self.covs).astype(np.float32))
+        d_cov_invs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+                               hostbuf = np.linalg.inv(self.covs).astype(np.float32))
+        d_emit_logp = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR,
+                                hostbuf = emit_logp.astype(np.float32))
+
+        self.cl_prg.calc_emit_logp(self.queue, emit_logp.shape, None,
+                                   self.d_obs, d_means, d_cov_dets, d_cov_invs, d_emit_logp,
+                                   np.int32(self.dim))
+
+        cl.enqueue_copy(self.queue, emit_logp, d_emit_logp)
+
+        #for state in self.uniq_states:
+        #    emit_logp[:,state-1] = multivariate_normal.logpdf(self.obs, mean = self.means[state-1], cov = self.covs[state-1])
+
+            
+        # state probabilities need to be interated over
+        for nth in xrange(self.N):
+            
+            # loop over states
+            for state in self.uniq_states:
+                # compute the transitional probability from the previous state
+                if nth == 0:
+                    trans_prev_logp = np.log(1 / self.num_states)
+                else:
+                    prev_state = self.states[nth - 1]
+                    trans_prev_logp = np.log(self.trans_p_matrix[prev_state-1, state-1])
+
+                # compute the transitional probability to the next state
+                if nth == self.N - 1:
+                    trans_next_logp = np.log(1)
+                else:
+                    next_state = self.states[nth + 1]
+                    trans_next_logp = np.log(self.trans_p_matrix[state-1, next_state-1])
+
+                state_logp[state - 1, nth] = trans_prev_logp + trans_next_logp
+                    
+            # resample state
+            self.states[nth] = sample(a = self.uniq_states, p = lognormalize(state_logp[:, nth] + emit_logp[:, nth]))
+
+        return self.states
+
+    
     def _infer_means_covs(self):
         """Infer the means of each hidden state without OpenCL.
         """
@@ -215,6 +268,6 @@ class GaussianHMMSampler(HMMSampler):
             self.trans_p_matrix[state_from-1] = count_p
         return
 
-hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = False)
+hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = False, cl_mode=True)
 hs.read_csv('./toydata/speed.csv.gz', obsvar_names = ['rt'])
 hs.do_inference()
