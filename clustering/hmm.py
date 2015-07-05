@@ -36,7 +36,7 @@ class HMMSampler(BaseSampler):
         self.data = pd.read_csv(filepath, compression = 'gzip')
         self.obs = self.data[obsvar_names]
         self.N = self.data.shape[0]
-        self.states = np.random.randint(low = 1, high = self.num_states + 1, size = self.N)
+        self.states = np.random.randint(low = 1, high = self.num_states + 1, size = self.N).astype(np.int32)
 
         if self.cl_mode:
             self.d_obs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
@@ -85,7 +85,9 @@ class GaussianHMMSampler(HMMSampler):
             for i in xrange(1, self.niter+1):
                 self._infer_means_covs()
                 self._infer_trans_p()
+                gpu_begin_time = time()
                 self._cl_infer_states()
+                self.gpu_time += time() - gpu_begin_time
                 self._save_sample(iteration = i)            
         else:
             for i in xrange(1, self.niter+1):
@@ -142,51 +144,42 @@ class GaussianHMMSampler(HMMSampler):
         """Infer the state of each observation without OpenCL.
         """
         # emission probabilities can be calculated in one pass
-        state_logp = np.empty((self.N, self.num_states))
+        state_logp = np.empty((self.N, self.num_states), dtype=np.float32)
         emit_logp = np.empty((self.N, self.num_states), dtype=np.float32)
 
         d_means = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = self.means.astype(np.float32))
-        d_cov_dets = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
-                               hostbuf = np.linalg.det(self.covs).astype(np.float32))
-        d_cov_invs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
-                               hostbuf = np.linalg.inv(self.covs).astype(np.float32))
-        d_emit_logp = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR,
-                                hostbuf = emit_logp.astype(np.float32))
+        d_cov_dets = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = np.linalg.det(self.covs).astype(np.float32))
+        d_cov_invs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = np.linalg.inv(self.covs).astype(np.float32))
+        d_emit_logp = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR, hostbuf = emit_logp.astype(np.float32))
 
         self.cl_prg.calc_emit_logp(self.queue, emit_logp.shape, None,
                                    self.d_obs, d_means, d_cov_dets, d_cov_invs, d_emit_logp,
                                    np.int32(self.dim))
-
-        cl.enqueue_copy(self.queue, emit_logp, d_emit_logp)
-
-        #for state in self.uniq_states:
-        #    emit_logp[:,state-1] = multivariate_normal.logpdf(self.obs, mean = self.means[state-1], cov = self.covs[state-1])
-
-            
+        
+        d_trans_p_matrix = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = self.trans_p_matrix.astype(np.float32))
+        d_state_logp = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR, hostbuf = state_logp)
+        d_rand = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+                           hostbuf = np.random.random(size = self.N).astype(np.float32))
+        d_temp_logp = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR,
+                                hostbuf = np.empty(self.num_states, dtype=np.float32))
+        #print(self.states)
         # state probabilities need to be interated over
         for nth in xrange(self.N):
+            # state log_p
+            self.cl_prg.calc_state_logp(self.queue, self.uniq_states.shape, None,
+                                        self.d_states, d_trans_p_matrix, d_state_logp,
+                                        np.int32(nth), np.int32(self.N))
             
-            # loop over states
-            for state in self.uniq_states:
-                # compute the transitional probability from the previous state
-                if nth == 0:
-                    trans_prev_logp = np.log(1 / self.num_states)
-                else:
-                    prev_state = self.states[nth - 1]
-                    trans_prev_logp = np.log(self.trans_p_matrix[prev_state-1, state-1])
-
-                # compute the transitional probability to the next state
-                if nth == self.N - 1:
-                    trans_next_logp = np.log(1)
-                else:
-                    next_state = self.states[nth + 1]
-                    trans_next_logp = np.log(self.trans_p_matrix[state-1, next_state-1])
-
-                state_logp[state - 1, nth] = trans_prev_logp + trans_next_logp
-                    
             # resample state
-            self.states[nth] = sample(a = self.uniq_states, p = lognormalize(state_logp[:, nth] + emit_logp[:, nth]))
+            self.cl_prg.resample_state(self.queue, (1,), None,
+                                       self.d_states, d_state_logp, d_emit_logp, d_temp_logp, d_rand,
+                                       np.int32(nth), np.int32(self.num_states))
+            
+            #self.states[nth] = sample(a = self.uniq_states, p = lognormalize(state_logp[nth] + emit_logp[nth]))
 
+        cl.enqueue_copy(self.queue, self.states, self.d_states)
+        #print(self.states)
+        #sys.exit(0)
         return self.states
 
     
@@ -268,6 +261,7 @@ class GaussianHMMSampler(HMMSampler):
             self.trans_p_matrix[state_from-1] = count_p
         return
 
-hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = False, cl_mode=True)
+hs = GaussianHMMSampler(num_states = 2, niter = 1000, record_best = False, cl_mode=False)
 hs.read_csv('./toydata/speed.csv.gz', obsvar_names = ['rt'])
-hs.do_inference()
+gt, tt = hs.do_inference()
+print(gt, tt)
