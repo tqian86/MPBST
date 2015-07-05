@@ -31,8 +31,8 @@ def sample(a, p):
         raise Exception('a != p')
     p = np.array(p)
     p = p / p.sum()
-    n = len(a)
     r = random.random()
+    n = len(a)
     total = 0           # range: [0,1]
     for i in xrange(n):
         total += p[i]
