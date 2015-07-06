@@ -12,6 +12,7 @@ from MPBST import *
 import itertools
 import numpy as np
 from scipy.stats import multivariate_normal
+from collections import Counter
 
 class HMMSampler(BaseSampler):
 
@@ -84,10 +85,10 @@ class GaussianHMMSampler(HMMSampler):
         if self.cl_mode:
             for i in xrange(1, self.niter+1):
                 self._infer_means_covs()
-                self._infer_trans_p()
                 gpu_begin_time = time()
-                self._cl_infer_states()
+                self._infer_trans_p()
                 self.gpu_time += time() - gpu_begin_time
+                self._cl_infer_states()
                 self._save_sample(iteration = i)            
         else:
             for i in xrange(1, self.niter+1):
@@ -108,31 +109,26 @@ class GaussianHMMSampler(HMMSampler):
         emit_logp = np.empty((self.num_states, self.N))
         for state in self.uniq_states:
             emit_logp[state-1] = multivariate_normal.logpdf(self.obs, mean = self.means[state-1], cov = self.covs[state-1])
-        
+
         trans_logp = np.log(self.trans_p_matrix)
         # state probabilities need to be interated over
         for nth in xrange(self.N):
 
-            # loop over states
-            for state in self.uniq_states:
-                # compute the transitional probability from the previous state
-                if nth == 0:
-                    trans_prev_logp = np.log(1 / self.num_states)
-                else:
-                    prev_state = self.states[nth - 1]
-                    trans_prev_logp = trans_logp[prev_state-1, state-1]
+            if nth == 0:
+                trans_prev_logp = [np.log(1 / self.num_states)] * self.num_states
+            else:
+                trans_prev_logp = trans_logp[self.states[nth - 1] - 1]
 
-                # compute the transitional probability to the next state
-                if nth == self.N - 1:
-                    trans_next_logp = np.log(1)
-                else:
-                    next_state = self.states[nth + 1]
-                    trans_next_logp = trans_logp[state-1, next_state-1]
+            if nth == self.N - 1:
+                trans_next_logp = [np.log(1)] * self.num_states
+            else:
+                trans_next_logp = trans_logp[:, self.states[nth + 1] - 1]
 
-                state_logp[state - 1, nth] = trans_prev_logp + trans_next_logp
-                    
+            state_logp[:, nth] = trans_prev_logp + trans_next_logp
+                
             # resample state
             self.states[nth] = sample(a = self.uniq_states, p = lognormalize(state_logp[:, nth] + emit_logp[:, nth]))
+
         return self.states
 
     def _cl_infer_states(self):
@@ -157,7 +153,7 @@ class GaussianHMMSampler(HMMSampler):
                            hostbuf = np.random.random(size = self.N).astype(np.float32))
         d_temp_logp = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR,
                                 hostbuf = np.empty(self.num_states, dtype=np.float32))
-        #print(self.states)
+
         # state probabilities need to be interated over
         for nth in xrange(self.N):
             # state log_p
@@ -167,23 +163,20 @@ class GaussianHMMSampler(HMMSampler):
             
             # resample state
             self.cl_prg.resample_state(self.queue, (1,), None,
-                                       self.d_states, d_state_logp, d_emit_logp, d_temp_logp, d_rand,
-                                       np.int32(nth), np.int32(self.num_states))
-            
-            #self.states[nth] = sample(a = self.uniq_states, p = lognormalize(state_logp[nth] + emit_logp[nth]))
-
+                                      self.d_states, d_state_logp, d_emit_logp, d_temp_logp, d_rand,
+                                      np.int32(nth), np.int32(self.num_states))
         cl.enqueue_copy(self.queue, self.states, self.d_states)
-        #print(self.states)
-        #sys.exit(0)
+
         return self.states
 
     
     def _infer_means_covs(self):
         """Infer the means of each hidden state without OpenCL.
         """
+        obs = np.array(self.obs)
         for state in self.uniq_states:
             # get observations currently assigned to this state
-            cluster_obs = np.array(self.obs.iloc[np.where(self.states == state)])
+            cluster_obs = obs[np.where(self.states == state)]
             n = cluster_obs.shape[0]
 
             # compute sufficient statistics
@@ -247,16 +240,18 @@ class GaussianHMMSampler(HMMSampler):
         count_p = np.empty(self.num_states)
         # make bigram pairs for easier counting
         pairs = zip(self.states[:self.N-1], self.states[1:])
-
+        pair_count = Counter(pairs)
+        
         for state_from in self.uniq_states:
             count_from_state = (self.states[:self.N-1] == state_from).sum()
             for state_to in self.uniq_states:
-                count_p[state_to - 1] = (pairs.count((state_from, state_to)) + 1) / (count_from_state + self.num_states)
+                count_p[state_to - 1] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + self.num_states)
                 
             self.trans_p_matrix[state_from-1] = count_p
         return
 
-hs = GaussianHMMSampler(num_states = 2, niter = 100, record_best = False, cl_mode=False)
+
+hs = GaussianHMMSampler(num_states = 2, niter = 1000, record_best = False, cl_mode=False)
 hs.read_csv('./toydata/speed.csv.gz', obsvar_names = ['rt'])
 gt, tt = hs.do_inference()
 print(gt, tt)
