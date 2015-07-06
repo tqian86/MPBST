@@ -1,4 +1,4 @@
-float sum(global float *arr, int start, int length) {
+static float sum(global float *arr, int start, int length) {
   float result = 0;
   for (int i = start; i < start + length; i++) {
     result += arr[i];
@@ -6,7 +6,7 @@ float sum(global float *arr, int start, int length) {
   return result;
 }
 
-float max_arr(global float *arr, int start, int length) {
+static float max_arr(global float *arr, int start, int length) {
   float result = arr[start];
   for (int i = start + 1; i < start + length; i++) {
     //if (arr[i] > result) result = arr[i];
@@ -15,7 +15,7 @@ float max_arr(global float *arr, int start, int length) {
   return result;
 }
 
-void lognormalize(global float *logp, int start, int length) {
+static void lognormalize(global float *logp, int start, int length) {
   float m = max_arr(logp, start, length);
   for (int i = start; i < start + length; i++) {
     logp[i] = powr(exp(1.0f), logp[i] - m);
@@ -30,9 +30,9 @@ void lognormalize(global float *logp, int start, int length) {
 }
 
 
-uint sample(uint a_size, global uint *a, global float *p, int start, float rand) {
+static uint sample(uint a_size, global uint *a, global float *p, int start, float rand) {
   float total = 0.0f;
-  for (int i = start; i < start + a_size; i++) {
+  for (uint i = start; i < start + a_size; i++) {
     total = total + p[i];
     if (total > rand) return a[i-start];
   }
@@ -55,21 +55,21 @@ kernel void calc_emit_logp(global float *obs,
   uint K = get_global_size(1); // get the total number of states
   
   float logp = 0;
-  logp += dim * log(2 * M_PI) + log(cov_dets[state_idx]);
+  logp += dim * log(2 * M_PI_F) + log(cov_dets[state_idx]);
 
   // calcualte (x - mu).T %*% inv(cov) %*% (x - mu)
   float mat_mul = 0.0f;
   float mat_inner;
-  for (int i = 0; i < dim; i++) {
+  for (uint i = 0; i < dim; i++) {
     mat_inner = 0.0f;
-    for (int j = 0; j < dim; j++) {
+    for (uint j = 0; j < dim; j++) {
       mat_inner += (obs[obs_idx * dim + j] - means[state_idx * dim + j]) * 
 	cov_invs[state_idx * dim * dim + j * dim + i];
     }
     mat_mul += mat_inner * (obs[obs_idx * dim + i] - means[state_idx * dim + i]);
   }
   
-  emit_logp[obs_idx * K + state_idx] = -0.5 * (logp + mat_mul);
+  emit_logp[obs_idx * K + state_idx] = -0.5f * (logp + mat_mul);
   
 }
 
@@ -81,25 +81,15 @@ kernel void calc_state_logp(global int *states,
 			    global float *state_logp,
 			    uint obs_idx, uint N) {
 
-  uint state_idx = get_global_id(0);
-  uint num_states = get_global_size(0);
-  
-  float trans_prev_logp, trans_next_logp;
-  uint prev_state_idx, next_state_idx;
-  
-  if (obs_idx == 0) {
-    trans_prev_logp = log(1.0f / num_states);
-  } else {
-    prev_state_idx = states[obs_idx - 1] - 1;
-    trans_prev_logp = log(trans_p_matrix[prev_state_idx * num_states + state_idx]);
-  }
+  int state_idx = get_global_id(0);
+  int num_states = get_global_size(0);
 
-  if (obs_idx == N - 1) {
-    trans_next_logp = log(1.0f);
-  } else {
-    next_state_idx = states[obs_idx + 1] - 1;
-    trans_next_logp = log(trans_p_matrix[state_idx * num_states + next_state_idx]);
-  }
+  float trans_prev_logp = (obs_idx != 0) * log(trans_p_matrix[(states[obs_idx-1 * (obs_idx!=0)]-1) * num_states + state_idx]) +
+    (obs_idx == 0) * log(1.0f / num_states);
+
+  float trans_next_logp = (obs_idx != N - 1) * log(trans_p_matrix[state_idx * num_states + (states[obs_idx + 1 * (obs_idx != N -1)] - 1)]) +
+    (obs_idx == N - 1) * log(1.0f);
+
   state_logp[obs_idx * num_states + state_idx] = trans_prev_logp + trans_next_logp;
   
 }
