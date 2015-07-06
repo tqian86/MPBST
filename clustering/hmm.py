@@ -85,9 +85,7 @@ class GaussianHMMSampler(HMMSampler):
         if self.cl_mode:
             for i in xrange(1, self.niter+1):
                 self._infer_means_covs()
-                gpu_begin_time = time()
                 self._infer_trans_p()
-                self.gpu_time += time() - gpu_begin_time
                 self._cl_infer_states()
                 self._save_sample(iteration = i)            
         else:
@@ -105,10 +103,10 @@ class GaussianHMMSampler(HMMSampler):
         """Infer the state of each observation without OpenCL.
         """        
         # emission probabilities can be calculated in one pass
-        state_logp = np.empty((self.num_states, self.N))
-        emit_logp = np.empty((self.num_states, self.N))
+        state_logp = np.empty((self.N, self.num_states))
+        emit_logp = np.empty((self.N, self.num_states))
         for state in self.uniq_states:
-            emit_logp[state-1] = multivariate_normal.logpdf(self.obs, mean = self.means[state-1], cov = self.covs[state-1])
+            emit_logp[:,state-1] = multivariate_normal.logpdf(self.obs, mean = self.means[state-1], cov = self.covs[state-1])
 
         trans_logp = np.log(self.trans_p_matrix)
         # state probabilities need to be interated over
@@ -124,10 +122,10 @@ class GaussianHMMSampler(HMMSampler):
             else:
                 trans_next_logp = trans_logp[:, self.states[nth + 1] - 1]
 
-            state_logp[:, nth] = trans_prev_logp + trans_next_logp
+            state_logp[nth] = trans_prev_logp + trans_next_logp
                 
             # resample state
-            self.states[nth] = sample(a = self.uniq_states, p = lognormalize(state_logp[:, nth] + emit_logp[:, nth]))
+            self.states[nth] = sample(a = self.uniq_states, p = lognormalize(state_logp[nth] + emit_logp[nth]))
 
         return self.states
 
@@ -143,6 +141,7 @@ class GaussianHMMSampler(HMMSampler):
         d_cov_invs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = np.linalg.inv(self.covs).astype(np.float32))
         d_emit_logp = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR, hostbuf = emit_logp.astype(np.float32))
 
+
         self.cl_prg.calc_emit_logp(self.queue, emit_logp.shape, None,
                                    self.d_obs, d_means, d_cov_dets, d_cov_invs, d_emit_logp,
                                    np.int32(self.dim))
@@ -157,14 +156,18 @@ class GaussianHMMSampler(HMMSampler):
         # state probabilities need to be interated over
         for nth in xrange(self.N):
             # state log_p
+            gpu_begin_time = time()
             self.cl_prg.calc_state_logp(self.queue, self.uniq_states.shape, None,
                                         self.d_states, d_trans_p_matrix, d_state_logp,
                                         np.int32(nth), np.int32(self.N))
-            
+            self.gpu_time += time() - gpu_begin_time            
+
             # resample state
             self.cl_prg.resample_state(self.queue, (1,), None,
                                       self.d_states, d_state_logp, d_emit_logp, d_temp_logp, d_rand,
                                       np.int32(nth), np.int32(self.num_states))
+
+            
         cl.enqueue_copy(self.queue, self.states, self.d_states)
 
         return self.states
@@ -251,7 +254,7 @@ class GaussianHMMSampler(HMMSampler):
         return
 
 
-hs = GaussianHMMSampler(num_states = 2, niter = 1000, record_best = False, cl_mode=False)
+hs = GaussianHMMSampler(num_states = 2, niter = 1000, record_best = False, cl_mode=True)
 hs.read_csv('./toydata/speed.csv.gz', obsvar_names = ['rt'])
 gt, tt = hs.do_inference()
 print(gt, tt)
