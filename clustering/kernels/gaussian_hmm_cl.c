@@ -118,3 +118,43 @@ kernel void resample_state(global int *states,
   }
   states[obs_idx] = num_states;
 }
+
+/* 
+   calculate the log joint probability of an hmm model, which incldues
+   the emisission probability of an observation (obs), and the transi-
+   tional probabilities between states
+*/
+kernel void calc_joint_logp(global float *obs,
+			    global int *states,
+			    global float *trans_p,
+			    global float *means,
+			    global float *cov_dets,
+			    global float *cov_invs,
+			    global float *joint_logp,
+			    uint K, uint dim) {
+  
+  uint obs_idx = get_global_id(0); // get the index of the observation of interest
+  uint state_idx = states[obs_idx] - 1;
+  
+  float logp = 0;
+  logp += dim * log(2 * M_PI_F) + log(cov_dets[state_idx]);
+
+  // calcualte (x - mu).T %*% inv(cov) %*% (x - mu)
+  float mat_mul = 0.0f;
+  float mat_inner;
+  for (uint i = 0; i < dim; i++) {
+    mat_inner = 0.0f;
+    for (uint j = 0; j < dim; j++) {
+      mat_inner += (obs[obs_idx * dim + j] - means[state_idx * dim + j]) * 
+	cov_invs[state_idx * dim * dim + j * dim + i];
+    }
+    mat_mul += mat_inner * (obs[obs_idx * dim + i] - means[state_idx * dim + i]);
+  }
+  logp = -0.5f * (logp + mat_mul);
+
+  // calculate transitional probabilities
+  uint prev_state_idx = states[(obs_idx - 1) * (obs_idx > 0)] - 1;
+  logp = logp + (obs_idx > 0) * log(trans_p[prev_state_idx * K + state_idx]) +
+    (obs_idx == 0) * log(1.0f / K);
+  joint_logp[obs_idx] = logp;
+}
