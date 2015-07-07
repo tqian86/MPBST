@@ -131,7 +131,8 @@ class BaseSampler(object):
         self.no_improv = 0
         self.gpu_time = 0
         self.total_time = 0
-
+        self.header_written = False
+        
     def read_csv(self, filepath, header = True):
         """Read data from a csv file.
         """
