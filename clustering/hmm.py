@@ -47,12 +47,15 @@ class HMMSampler(BaseSampler):
         
 class GaussianHMMSampler(HMMSampler):
 
-    def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None, niter = 1000, thining = 0, annealing = True):
+    def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None, niter = 1000, thining = 0, annealing = False):
         """Initialize the base HMM sampler.
         """
         HMMSampler.__init__(self, num_states, record_best, cl_mode, cl_device, niter, thining, annealing)
 
         if cl_mode:
+            global cl
+            import pyopencl as cl
+            import pyopencl.array
             program_str = open(pkg_dir + 'MPBST/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
             self.d_X, self.d_outcome_obs = None, None
@@ -96,9 +99,9 @@ class GaussianHMMSampler(HMMSampler):
             if self.record_best:
                 if self.auto_save_sample((new_means, new_covs, new_trans_p, new_states)):
                     print(self.means)
-                    self.means, self.covs, self.trans_p_matrix, self.states = new_means, new_covs, new_trans_p, new_states
                     self._save_sample(iteration = i)
-                if self.no_improvement(): break
+                if self.no_improvement(800): break
+                self.means, self.covs, self.trans_p_matrix, self.states = new_means, new_covs, new_trans_p, new_states
             else:
                 self.means, self.covs, self.trans_p_matrix, self.states = new_means, new_covs, new_trans_p, new_states                    
                 self._save_sample(iteration = i)
@@ -309,7 +312,7 @@ class GaussianHMMSampler(HMMSampler):
         return
     
 
-hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=False)
+hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=True)
 hs.read_csv('./toydata/speed.csv.gz', obsvar_names = ['rt'])
 gt, tt = hs.do_inference()
 print(gt, tt)

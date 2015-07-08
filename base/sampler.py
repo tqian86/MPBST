@@ -7,9 +7,6 @@ import pandas as pd
 import sys, copy, random, math, csv, gzip, mimetypes, os.path
 from time import time
 
-import pyopencl as cl
-import pyopencl.array, pyopencl.tools, pyopencl.clrandom
-
 def smallest_unused_label(int_labels):
 
     if len(int_labels) == 0: return [], [], 0
@@ -102,6 +99,8 @@ class BaseSampler(object):
         """Initialize the class.
         """
         if cl_mode:
+            import pyopencl as cl
+            import pyopencl.array, pyopencl.tools, pyopencl.clrandom
             if cl_device == 'gpu':
                 gpu_devices = []
                 for platform in cl.get_platforms():

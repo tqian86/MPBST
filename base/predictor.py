@@ -2,9 +2,8 @@
 #-*- coding: utf-8 -*-
 
 from __future__ import print_function
-import pyopencl as cl, numpy as np
-import pyopencl.array
 import sys, copy, random, math, csv, gzip, mimetypes, os.path
+import numpy as np
 import cPickle
 from time import time
 
@@ -27,6 +26,8 @@ class BasePredictor(object):
         """Initialize the class.
         """
         if cl_mode:
+            import pyopencl as cl
+            import pyopencl.array
             if cl_device == 'gpu':
                 gpu_devices = []
                 for platform in cl.get_platforms():
