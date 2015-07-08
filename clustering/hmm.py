@@ -7,7 +7,7 @@ import sys, os.path
 pkg_dir = os.path.dirname(os.path.realpath(__file__)) + '/../../'
 sys.path.append(pkg_dir)
 
-from MPBST import *
+from MPBST.base.sampler import *
 
 import itertools
 import numpy as np
@@ -16,10 +16,10 @@ from collections import Counter
 
 class HMMSampler(BaseSampler):
 
-    def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None, niter = 1000):
+    def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None, niter = 1000, thining = 0, annealing = True):
         """Initialize the base HMM sampler.
         """
-        BaseSampler.__init__(self, record_best, cl_mode, cl_device, niter)
+        BaseSampler.__init__(self, record_best, cl_mode, cl_device, niter, thining, annealing = True)
 
         self.data = None
         self.num_states = num_states
@@ -47,10 +47,10 @@ class HMMSampler(BaseSampler):
         
 class GaussianHMMSampler(HMMSampler):
 
-    def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None, niter = 1000):
+    def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None, niter = 1000, thining = 0, annealing = True):
         """Initialize the base HMM sampler.
         """
-        HMMSampler.__init__(self, num_states, record_best, cl_mode, cl_device, niter)
+        HMMSampler.__init__(self, num_states, record_best, cl_mode, cl_device, niter, thining, annealing)
 
         if cl_mode:
             program_str = open(pkg_dir + 'MPBST/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
@@ -83,6 +83,7 @@ class GaussianHMMSampler(HMMSampler):
 
         begin_time = time()
         for i in xrange(1, self.niter+1):
+            self.set_temperature(iteration = i)
             if self.cl_mode:
                 new_means, new_covs = self._infer_means_covs()
                 new_trans_p = self._infer_trans_p()
@@ -95,9 +96,9 @@ class GaussianHMMSampler(HMMSampler):
             if self.record_best:
                 if self.auto_save_sample((new_means, new_covs, new_trans_p, new_states)):
                     print(self.means)
+                    self.means, self.covs, self.trans_p_matrix, self.states = new_means, new_covs, new_trans_p, new_states
                     self._save_sample(iteration = i)
                 if self.no_improvement(): break
-                self.means, self.covs, self.trans_p_matrix, self.states = new_means, new_covs, new_trans_p, new_states
             else:
                 self.means, self.covs, self.trans_p_matrix, self.states = new_means, new_covs, new_trans_p, new_states                    
                 self._save_sample(iteration = i)
@@ -133,9 +134,11 @@ class GaussianHMMSampler(HMMSampler):
                 trans_next_logp = trans_logp[:, new_states[nth + 1] - 1]
 
             state_logp[nth] = trans_prev_logp + trans_next_logp
-                
+
+            #print(self.annealing_temp); raw_input()
             # resample state
-            new_states[nth] = sample(a = self.uniq_states, p = lognormalize(state_logp[nth] + emit_logp[nth]))
+            new_states[nth] = sample(a = self.uniq_states,
+                                     p = lognormalize(x = state_logp[nth] + emit_logp[nth], temp = self.annealing_temp))
             
         return new_states
 
@@ -306,7 +309,7 @@ class GaussianHMMSampler(HMMSampler):
         return
     
 
-hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=True)
+hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=False)
 hs.read_csv('./toydata/speed.csv.gz', obsvar_names = ['rt'])
 gt, tt = hs.do_inference()
 print(gt, tt)
