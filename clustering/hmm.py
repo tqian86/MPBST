@@ -24,8 +24,8 @@ class HMMSampler(BaseSampler):
         self.data = None
         self.num_states = num_states
         self.uniq_states = np.linspace(1, self.num_states, self.num_states).astype(np.int64)
-        self.trans_p_matrix = np.empty((num_states, num_states))
-        self.trans_p_matrix.fill(1 / num_states)
+        self.trans_p_matrix = np.random.random((num_states, num_states))
+        self.trans_p_matrix = self.trans_p_matrix / self.trans_p_matrix.sum(axis=1)
         
     def read_csv(self, filepath, obsvar_names = ['obs'], header = True):
         """Read data from a csv file and check for observations.
@@ -312,7 +312,8 @@ class GaussianHMMSampler(HMMSampler):
         return
     
 
-hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=True)
-hs.read_csv('./toydata/speed.csv.gz', obsvar_names = ['rt'])
-gt, tt = hs.do_inference()
-print(gt, tt)
+if __name__ == '__main__':
+    hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=True)
+    hs.read_csv('./toydata/speed.csv.gz', obsvar_names = ['rt'])
+    gt, tt = hs.do_inference()
+    print(gt, tt)
