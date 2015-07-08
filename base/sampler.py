@@ -7,6 +7,9 @@ import pandas as pd
 import sys, copy, random, math, csv, gzip, mimetypes, os.path
 from time import time
 
+import pyopencl as cl
+import pyopencl.array, pyopencl.tools, pyopencl.clrandom
+
 def smallest_unused_label(int_labels):
 
     if len(int_labels) == 0: return [], [], 0
@@ -18,10 +21,15 @@ def smallest_unused_label(int_labels):
     uniq_labels = np.unique(int_labels)
     return label_count, uniq_labels, new_label
 
-def lognormalize(x):
-    # adapt it to numpypy
+def lognormalize(x, temp = 1):
+    """Normalize a vector of logprobabilities to probabilities that sum up to 1.
+    Optionally accepts an annealing temperature that does simple annealing.
+    """
+    if type(x) is list: x = np.array(x)
+
     x = x - np.max(x)
-    xp = np.exp(x)
+    # anneal
+    xp = np.power(np.exp(x), temp)
     return xp / xp.sum()
 
 def sample(a, p):
@@ -90,13 +98,10 @@ def print_matrix_in_row(npmat, file_dest):
 
 class BaseSampler(object):
 
-    def __init__(self, record_best, cl_mode, cl_device = None, niter=1000):
+    def __init__(self, record_best, cl_mode, cl_device = None, niter=1000, thining = 0, annealing = False):
         """Initialize the class.
         """
         if cl_mode:
-            import pyopencl as cl
-            import pyopencl.array, pyopencl.tools, pyopencl.clrandom
-
             if cl_device == 'gpu':
                 gpu_devices = []
                 for platform in cl.get_platforms():
@@ -132,6 +137,8 @@ class BaseSampler(object):
         self.gpu_time = 0
         self.total_time = 0
         self.header_written = False
+        self.annealing = annealing
+        self.annealing_temp = 1
         
     def read_csv(self, filepath, header = True):
         """Read data from a csv file.
@@ -157,8 +164,23 @@ class BaseSampler(object):
     def direct_read_obs(self, obs):
         self.obs = obs
 
-    def set_sampling_params(self, niter = 1000, thining = 1, burnin = 0):
-        self.niter, self.thining, self.burnin = niter, thining, burnin
+    def set_temperature(self, iteration):
+        """Set the temperature of simulated annealing as a function of sampling progress.
+        """
+        if self.annealing is False:
+            self.annealing_temp = 1.0
+            return
+
+        if iteration < self.niter * 0.2:
+            self.annealing_temp = 0.2
+        elif iteration < self.niter * 0.3:
+            self.annealing_temp = 0.4
+        elif iteration < self.niter * 0.4:
+            self.annealing_temp = 0.6
+        elif iteration < self.niter * 0.5:
+            self.annealing_temp = 0.8
+        else:
+            self.annealing_temp = 1.0
 
     def do_inference(self, output_file = None):
         """Perform inference. This method does nothing in the base class.
@@ -190,7 +212,7 @@ class BaseSampler(object):
     def no_improvement(self, threshold=500):
         if len(self.best_diff) == 0: return False
         if self.no_improv > threshold or np.mean(self.best_diff[-threshold:]) < .1:
-            print('Too little improvement in loglikelihood - Abort searching', file=sys.stderr)
+            print('Too little improvement in loglikelihood for %s iterations - Abort searching' % threshold, file=sys.stderr)
             return True
         return False
 
@@ -201,7 +223,6 @@ class BaseSampler(object):
         return
 
 class RegressionSampler(BaseSampler):
-
 
     def read_csv(self, filepath):
         """Read data from a csv file and store them in a numpy array.
