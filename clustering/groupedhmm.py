@@ -93,9 +93,9 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
             if self.record_best:
                 if self.auto_save_sample((new_means, new_covs, new_trans_p, new_states)):
                     print(self.means)
-                    self.means, self.covs, self.trans_p_matrix, self.group_states = new_means, new_covs, new_trans_p, new_states
                     self._save_sample(iteration = i)
                 if self.no_improvement(): break
+                self.means, self.covs, self.trans_p_matrix, self.group_states = new_means, new_covs, new_trans_p, new_states
             else:
                 self.means, self.covs, self.trans_p_matrix, self.group_states = new_means, new_covs, new_trans_p, new_states                    
                 self._save_sample(iteration = i)
@@ -262,12 +262,11 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
     def _logprob(self, sample):
         """Calculate the log probability of model and data.
         """
-        obs = np.array(self.obs)
-        means, covs, trans_p, states = sample
-
-        gpu_begin_time = time()
+        means, covs, trans_p, group_states = sample
 
         if self.cl_mode:
+            gpu_begin_time = time()
+
             joint_logp = np.empty(self.N, dtype=np.float32)
             d_means = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = means.astype(np.float32))
             d_states = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = states.astype(np.int32))
@@ -281,17 +280,24 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
                                         np.int32(self.num_states), np.int32(self.dim))
             cl.enqueue_copy(self.queue, joint_logp, d_joint_logp)
 
+            self.gpu_time += time() - gpu_begin_time
         else:
-            joint_logp = np.empty(self.N)
-            # calculate transition probabilities first
-            joint_logp[0] = np.log(1 / self.num_states)
-            joint_logp[1:] = np.log(trans_p[states[:self.N-1] - 1, states[1:] - 1])
-            # emission probs
-            joint_logp = joint_logp + np.array([multivariate_normal.logpdf(obs[i], mean = means[states[i]-1], cov = covs[states[i]-1]) for i in xrange(self.N)])
-            
-        self.gpu_time += time() - gpu_begin_time
-            
-        return joint_logp.sum()
+            joint_logp = []
+
+            for lv_idx in xrange(len(self.group_levels)):
+                N = self.group_Ns[lv_idx]
+                obs = self.group_obs[lv_idx]
+                states = group_states[lv_idx]
+                joint_logp.append(np.empty(N))
+                joint_logp[lv_idx][0] = np.log(1 / self.num_states)
+                joint_logp[lv_idx][1:] = np.log(trans_p[states[:N-1] - 1, states[1:] - 1])
+
+                joint_logp[lv_idx] = joint_logp[lv_idx] + \
+                                     np.array([multivariate_normal.logpdf(obs[i], mean = means[states[i]-1], cov = covs[states[i]-1])
+                                               for i in xrange(N)])
+                
+                
+        return np.sum([_.sum() for _ in joint_logp])
 
     def _save_sample(self, iteration):
         """Save the means and covariance matrices from the current iteration.
@@ -312,7 +318,7 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
         return
     
 
-hs = GaussianGroupedHMMSampler(num_states = 2, niter = 2000, record_best = False, cl_mode=False)
+hs = GaussianGroupedHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=False, debug_mumble = True)
 hs.read_csv('./toydata/speed.csv.gz', obsvar_names = ['rt'], group = 'corr')
 gt, tt = hs.do_inference()
 print(gt, tt)
