@@ -95,7 +95,7 @@ def print_matrix_in_row(npmat, file_dest):
 
 class BaseSampler(object):
 
-    def __init__(self, record_best, cl_mode, cl_device = None, niter=1000, thining = 0, annealing = False):
+    def __init__(self, record_best, cl_mode, cl_device = None, niter=1000, thining = 0, annealing = False, debug_mumble = False):
         """Initialize the class.
         """
         if cl_mode:
@@ -138,6 +138,7 @@ class BaseSampler(object):
         self.header_written = False
         self.annealing = annealing
         self.annealing_temp = 1
+        self.debug_mumble = debug_mumble
         
     def read_csv(self, filepath, header = True):
         """Read data from a csv file.
@@ -194,7 +195,7 @@ class BaseSampler(object):
         # if there's no best sample recorded yet
         if self.best_sample[0] is None and self.best_sample[1] is None:
             self.best_sample = (sample, new_logprob)
-            print('Initial sample generated, loglik: {0}'.format(new_logprob), file=sys.stderr)
+            if self.debug_mumble: print('Initial sample generated, loglik: {0}'.format(new_logprob), file=sys.stderr)
             return
 
         # if there's a best sample
@@ -202,7 +203,7 @@ class BaseSampler(object):
             self.no_improv = 0
             self.best_diff.append(new_logprob - self.best_sample[1])
             self.best_sample = (copy.deepcopy(sample), new_logprob)
-            print('New best sample found, loglik: {0}'.format(new_logprob), file=sys.stderr)
+            if self.debug_mumble: print('New best sample found, loglik: {0}'.format(new_logprob), file=sys.stderr)
             return True
         else:
             self.no_improv += 1

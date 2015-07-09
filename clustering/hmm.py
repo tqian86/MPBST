@@ -16,10 +16,13 @@ from collections import Counter
 
 class HMMSampler(BaseSampler):
 
-    def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None, niter = 1000, thining = 0, annealing = True):
+    def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None,
+                 niter = 1000, thining = 0,
+                 annealing = False, debug_mumble = False):
         """Initialize the base HMM sampler.
         """
-        BaseSampler.__init__(self, record_best, cl_mode, cl_device, niter, thining, annealing = True)
+        BaseSampler.__init__(self, record_best, cl_mode, cl_device, niter, thining,
+                             annealing = annealing, debug_mumble = debug_mumble)
 
         self.data = None
         self.num_states = num_states
@@ -47,10 +50,11 @@ class HMMSampler(BaseSampler):
         
 class GaussianHMMSampler(HMMSampler):
 
-    def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None, niter = 1000, thining = 0, annealing = False):
+    def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None, niter = 1000, thining = 0,
+                 annealing = False, debug_mumble = False):
         """Initialize the base HMM sampler.
         """
-        HMMSampler.__init__(self, num_states, record_best, cl_mode, cl_device, niter, thining, annealing)
+        HMMSampler.__init__(self, num_states, record_best, cl_mode, cl_device, niter, thining, annealing, debug_mumble)
 
         if cl_mode:
             global cl
@@ -313,7 +317,7 @@ class GaussianHMMSampler(HMMSampler):
     
 
 if __name__ == '__main__':
-    hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=True)
+    hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=True, debug_mumble = True)
     hs.read_csv('./toydata/speed.csv.gz', obsvar_names = ['rt'])
     gt, tt = hs.do_inference()
     print(gt, tt)

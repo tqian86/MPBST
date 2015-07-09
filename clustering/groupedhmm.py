@@ -39,11 +39,14 @@ class GroupedHMMSampler(HMMSampler):
 
 class GaussianGroupedHMMSampler(GroupedHMMSampler):
 
-    def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None, niter = 1000, thining = 0, annealing = False):
-        """Initialize the base HMM sampler.
+    def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None, niter = 1000, thining = 0,
+                 annealing = False, debug_mumble = False):
+        """Initialize the Grouped Gaussian HMM sampler.
         """
-        GroupedHMMSampler.__init__(self, num_states, record_best, cl_mode, cl_device, niter, thining, annealing)
+        GroupedHMMSampler.__init__(self, num_states, record_best, cl_mode, cl_device, niter, thining,
+                                   annealing, debug_mumble)
         if cl_mode:
+            global cl
             import pyopencl as cl
             import pyopencl.array
             
