@@ -90,10 +90,11 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
         Line-number order will be used as time step order. Values of the variable named 
         'group' will be extracted as grouping levels. 
 
-        @args: obsvar_names - optionally specify a list of variables that should be extracted
-                              as observations. All variables must be of the same type.
-               group - optionally specify a grouping variable
-               header - optionally turns off recognizing the first line as header
+        @args: 
+        obsvar_names - optionally specify a list of variables that should be extracted
+                       as observations. All variables must be of the same type.
+        group - optionally specify a grouping variable
+        header - optionally turns off recognizing the first line as header
         """
         GroupedHMMSampler.read_csv(self, filepath, obsvar_names, group = group, header = header)
         self.dim = len(obsvar_names)
@@ -353,8 +354,10 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
             print(*row, sep = ',', file = self.sample_fp)
                 
         return
-    
-hs = GaussianGroupedHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=False, debug_mumble = True)
-hs.read_csv('./toydata/speed.csv.gz', obsvar_names = ['rt'], group = 'corr')
-gt, tt = hs.do_inference()
-print(gt, tt)
+
+# temporary debug code
+if __name__ == '__main__':
+    hs = GaussianGroupedHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=False, debug_mumble = True)
+    hs.read_csv('./toydata/speed.csv.gz', obsvar_names = ['rt'], group = 'corr')
+    gt, tt = hs.do_inference()
+    print(gt, tt)
