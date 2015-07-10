@@ -1,5 +1,34 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+"""Grouped Hidden Markov Models.
+
+This module implements Grouped Hidden Markov Models (grouped HMMs). A grouped HMM is used to
+represent common hidden states that are shared by a number of different sequences of observations.
+
+For example, in a typical natural language processing task known as part-of-speech tagging, it is
+intuitively reasonable to assume that different sentences (sequences of observations) of the same
+language share the same set of underlying part-of-speech tags (e.g., nouns, verbs). It thus makes
+sense to infer a common set of hidden states for these sentences, rather than individual ones.
+
+Note that equivalently, one can `glue' a corpus of sentences together and insert sentence boundaries 
+markers to create a gigantic single sequence of observations, and model it with regular HMM. 
+
+However, the present grouped HMMs expect input data in the following format:
+
+(time_step,) observation, grouping_factor
+
+which is commonly used in many fields of research (sometimes referred to as the long format). 
+In such cases, these grouped HMM modules provide the convenient interface for training a common 
+HMM without modifying the source data.
+
+Available models:
+- Grouped HMM with k-dimensional Gaussian/Normal emission probability distributions 
+  (K can be anything from 1 to whatever makes sense in your data)
+
+Planned models:
+- Grouped HMM with categorical emission probability distributions
+
+"""
 
 from __future__ import print_function, division
 
@@ -55,7 +84,16 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
             self.d_X, self.d_outcome_obs = None, None
         
     def read_csv(self, filepath, obsvar_names = ['obs'], group = 'group', header = True):
-        """Read data from a csv file and check for observations.
+        """Read data from a csv file and check for observations. 
+        
+        By default, values of the variable named 'obs' will be extracted as observations. 
+        Line-number order will be used as time step order. Values of the variable named 
+        'group' will be extracted as grouping levels. 
+
+        @args: obsvar_names - optionally specify a list of variables that should be extracted
+                              as observations. All variables must be of the same type.
+               group - optionally specify a grouping variable
+               header - optionally turns off recognizing the first line as header
         """
         GroupedHMMSampler.read_csv(self, filepath, obsvar_names, group = group, header = header)
         self.dim = len(obsvar_names)
@@ -296,7 +334,6 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
                                      np.array([multivariate_normal.logpdf(obs[i], mean = means[states[i]-1], cov = covs[states[i]-1])
                                                for i in xrange(N)])
                 
-                
         return np.sum([_.sum() for _ in joint_logp])
 
     def _save_sample(self, iteration):
@@ -317,7 +354,6 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
                 
         return
     
-
 hs = GaussianGroupedHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=False, debug_mumble = True)
 hs.read_csv('./toydata/speed.csv.gz', obsvar_names = ['rt'], group = 'corr')
 gt, tt = hs.do_inference()
