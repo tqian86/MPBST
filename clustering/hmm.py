@@ -102,12 +102,14 @@ class GaussianHMMSampler(HMMSampler):
 
             if self.record_best:
                 if self.auto_save_sample((new_means, new_covs, new_trans_p, new_states)):
-                    print(self.means)
+                    print('Means: ', self.means, file=sys.stderr)
+                    self.loglik = self.best_sample[1]
                     self._save_sample(iteration = i)
-                if self.no_improvement(800): break
+                if self.no_improvement(): break
                 self.means, self.covs, self.trans_p_matrix, self.states = new_means, new_covs, new_trans_p, new_states
             else:
-                self.means, self.covs, self.trans_p_matrix, self.states = new_means, new_covs, new_trans_p, new_states                    
+                self.means, self.covs, self.trans_p_matrix, self.states = new_means, new_covs, new_trans_p, new_states
+                self.loglik = self._logprob((new_means, new_covs, new_trans_p, new_states))
                 self._save_sample(iteration = i)
                 
         self.total_time += time() - begin_time
@@ -301,7 +303,7 @@ class GaussianHMMSampler(HMMSampler):
         """Save the means and covariance matrices from the current iteration.
         """
         if not self.header_written: 
-            header = ['iteration', 'dimension', 'state'] + ['mu_{0:d}'.format(_) for _ in range(1, self.dim+1)]
+            header = ['iteration', 'loglik', 'dimension', 'state'] + ['mu_{0:d}'.format(_) for _ in range(1, self.dim+1)]
             header += ['cov_{0:d}_{1:d}'.format(*_) for _ in itertools.product(*[range(1, self.dim+1)] * 2)]
             header += ['trans_p_to_{0:d}'.format(_) for _ in self.uniq_states]
             header += ['has_obs_{0:d}'.format(_) for _ in range(1, self.N + 1)]
@@ -309,7 +311,7 @@ class GaussianHMMSampler(HMMSampler):
             self.header_written = True
 
         for state in self.uniq_states:
-            row = [iteration, self.dim, state] + list(self.means[state-1]) + list(np.ravel(self.covs[state-1])) + list(np.ravel(self.trans_p_matrix[state-1]))
+            row = [iteration, self.loglik, self.dim, state] + list(self.means[state-1]) + list(np.ravel(self.covs[state-1])) + list(np.ravel(self.trans_p_matrix[state-1]))
             row += list((self.states == state).astype(np.bool).astype(np.int0))
             print(*row, sep = ',', file = self.sample_fp)
                 
@@ -317,7 +319,7 @@ class GaussianHMMSampler(HMMSampler):
     
 
 if __name__ == '__main__':
-    hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=True, debug_mumble = True)
+    hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = False, cl_mode=True, debug_mumble = True)
     hs.read_csv('./toydata/speed.csv.gz', obsvar_names = ['rt'])
     gt, tt = hs.do_inference()
     print(gt, tt)
