@@ -262,7 +262,7 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
             T_n = self.wishart_T0 + cov_obs + cov_mu0 * self.gaussian_k0 * n / k_n
 
             # new mu is sampled from a multivariate t with the following parameters
-            df = v_n - self.dim + 1
+            df = max(1, v_n - self.dim + 1)
             mu_n = (self.gaussian_k0 * self.gaussian_mu0 + n * mu) / k_n
             Sigma = T_n / (k_n * df)
 
@@ -325,7 +325,7 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
             self.gpu_time += time() - gpu_begin_time
         else:
             joint_logp = []
-
+            
             for lv_idx in xrange(len(self.group_levels)):
                 N = self.group_Ns[lv_idx]
                 obs = self.group_obs[lv_idx]
@@ -337,7 +337,7 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
                 joint_logp[lv_idx] = joint_logp[lv_idx] + \
                                      np.array([multivariate_normal.logpdf(obs[i], mean = means[states[i]-1], cov = covs[states[i]-1])
                                                for i in xrange(N)])
-                
+
         return np.sum([_.sum() for _ in joint_logp])
 
     def _save_sample(self, iteration):
