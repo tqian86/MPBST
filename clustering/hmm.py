@@ -62,7 +62,6 @@ class GaussianHMMSampler(HMMSampler):
             import pyopencl.array
             program_str = open(pkg_dir + 'MPBST/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
-            self.d_X, self.d_outcome_obs = None, None
         
     def read_csv(self, filepath, obsvar_names = ['obs'], header = True):
         """Read data from a csv file and check for observations.
