@@ -61,11 +61,13 @@ class GroupedHMMSampler(HMMSampler):
         self.group_states = [np.random.randint(low = 1, high = self.num_states + 1, size = self.group_Ns[lv_idx]).astype(np.int32)
                              for lv_idx in xrange(len(self.group_levels))]
 
-        #if self.cl_mode:
-        #    self.d_obs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
-        #                           hostbuf = np.array(self.obs, dtype=np.float32, order='C'))
-        #    self.d_states = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR,
-        #                              hostbuf = self.group_states.astype(np.int32))
+        if self.cl_mode:
+            self.d_obs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+                                   hostbuf = np.vstack(self.group_obs).astype(np.float32))
+            self.d_group_Ns = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+                                        hostbuf = self.group_Ns.astype(np.int32))
+            self.d_group_states = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR,
+                                            hostbuf = np.hstack(self.group_states).astype(np.int32))
 
 class GaussianGroupedHMMSampler(GroupedHMMSampler):
 
@@ -79,11 +81,9 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
             global cl
             import pyopencl as cl
             import pyopencl.array
-            
-            program_str = open(pkg_dir + 'MPBST/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
+            program_str = open(pkg_dir + 'MPBST/clustering/kernels/gaussian_ghmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
-            self.d_X, self.d_outcome_obs = None, None
-        
+
     def read_csv(self, filepath, obsvar_names = ['obs'], group = 'group', header = True):
         """Read data from a csv file and check for observations. 
         
@@ -143,7 +143,6 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
                 self._save_sample(iteration = i)
 
         print(*self.group_states, sep='\n')
-                
         self.total_time += time() - begin_time
         
         return self.gpu_time, self.total_time
