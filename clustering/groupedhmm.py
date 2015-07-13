@@ -55,8 +55,9 @@ class GroupedHMMSampler(HMMSampler):
         self.data = pd.read_csv(filepath, compression = 'gzip')
         self.group_levels, self.group_Ns = np.unique(self.data[group], return_counts=True)
         self.N = self.group_Ns.sum()
-        self.group_obs = [np.reshape(self.data.loc[self.data[group] == self.group_levels[lv_idx], obsvar_names].values, newshape = self.group_Ns[lv_idx], order='C')
+        self.group_obs = [self.data.ix[self.data[group] == self.group_levels[lv_idx], obsvar_names].values
                           for lv_idx in xrange(len(self.group_levels))]
+        #print(self.group_obs[0]); print(self.data.ix[self.data[group] == self.group_levels[0]]); raw_input()
         self.group_states = [np.random.randint(low = 1, high = self.num_states + 1, size = self.group_Ns[lv_idx]).astype(np.int32)
                              for lv_idx in xrange(len(self.group_levels))]
 
@@ -232,7 +233,7 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
     def _infer_means_covs(self):
         """Infer the means of each hidden state without OpenCL.
         """
-        obs = np.array(np.hstack(self.group_obs))
+        obs = np.array(np.vstack(self.group_obs))
         all_states = np.array(np.hstack(self.group_states))
         new_means = np.empty_like(self.means)
         new_covs = np.empty_like(self.covs)
