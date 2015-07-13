@@ -133,11 +133,13 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
             if self.record_best:
                 if self.auto_save_sample((new_means, new_covs, new_trans_p, new_states)):
                     print(self.means)
+                    self.loglik = self.best_sample[1]
                     self._save_sample(iteration = i)
                 if self.no_improvement(): break
                 self.means, self.covs, self.trans_p_matrix, self.group_states = new_means, new_covs, new_trans_p, new_states
             else:
-                self.means, self.covs, self.trans_p_matrix, self.group_states = new_means, new_covs, new_trans_p, new_states                    
+                self.means, self.covs, self.trans_p_matrix, self.group_states = new_means, new_covs, new_trans_p, new_states
+                self.loglik = self._logprob((new_means, new_covs, new_trans_p, new_states))
                 self._save_sample(iteration = i)
 
         print(*self.group_states, sep='\n')
@@ -342,7 +344,7 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
         """Save the means and covariance matrices from the current iteration.
         """
         if not self.header_written: 
-            header = ['iteration', 'dimension', 'state'] + ['mu_{0:d}'.format(_) for _ in range(1, self.dim+1)]
+            header = ['iteration', 'loglik', 'dimension', 'state'] + ['mu_{0:d}'.format(_) for _ in range(1, self.dim+1)]
             header += ['cov_{0:d}_{1:d}'.format(*_) for _ in itertools.product(*[range(1, self.dim+1)] * 2)]
             header += ['trans_p_to_{0:d}'.format(_) for _ in self.uniq_states]
             #header += ['has_obs_{0:d}'.format(_) for _ in range(1, self.N + 1)]
@@ -350,7 +352,7 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
             self.header_written = True
 
         for state in self.uniq_states:
-            row = [iteration, self.dim, state] + list(self.means[state-1]) + list(np.ravel(self.covs[state-1])) + list(np.ravel(self.trans_p_matrix[state-1]))
+            row = [iteration, self.loglik, self.dim, state] + list(self.means[state-1]) + list(np.ravel(self.covs[state-1])) + list(np.ravel(self.trans_p_matrix[state-1]))
             #row += list((self.states == state).astype(np.bool).astype(np.int0))
             print(*row, sep = ',', file = self.sample_fp)
                 
