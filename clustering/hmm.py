@@ -270,9 +270,8 @@ class GaussianHMMSampler(HMMSampler):
         obs = np.array(self.obs)
         means, covs, trans_p, states = sample
 
-        gpu_begin_time = time()
-
         if self.cl_mode:
+            gpu_begin_time = time()
             joint_logp = np.empty(self.N, dtype=np.float32)
             d_means = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = means.astype(np.float32))
             d_states = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = states.astype(np.int32))
@@ -285,6 +284,7 @@ class GaussianHMMSampler(HMMSampler):
                                         self.d_obs, d_states, d_trans_p, d_means, d_cov_dets, d_cov_invs, d_joint_logp,
                                         np.int32(self.num_states), np.int32(self.dim))
             cl.enqueue_copy(self.queue, joint_logp, d_joint_logp)
+            self.gpu_time += time() - gpu_begin_time
 
         else:
             joint_logp = np.empty(self.N)
@@ -293,9 +293,7 @@ class GaussianHMMSampler(HMMSampler):
             joint_logp[1:] = np.log(trans_p[states[:self.N-1] - 1, states[1:] - 1])
             # emission probs
             joint_logp = joint_logp + np.array([multivariate_normal.logpdf(obs[i], mean = means[states[i]-1], cov = covs[states[i]-1]) for i in xrange(self.N)])
-            
-        self.gpu_time += time() - gpu_begin_time
-            
+
         return joint_logp.sum()
 
     def _save_sample(self, iteration):
