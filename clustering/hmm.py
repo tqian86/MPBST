@@ -63,19 +63,30 @@ class GaussianHMMSampler(HMMSampler):
             program_str = open(pkg_dir + 'MPBST/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
         
-    def read_csv(self, filepath, obsvar_names = ['obs'], header = True):
+    def read_csv(self, filepath, obsvar_names = ['obs'], iid = False, header = True):
         """Read data from a csv file and check for observations.
         """
         HMMSampler.read_csv(self, filepath, obsvar_names, header)
-        self.dim = len(obsvar_names)
-        self.means = np.zeros((self.num_states, self.dim)) # the mean vector of each state
-        self.covs = np.array([np.eye(self.dim) for _ in xrange(self.num_states)]) # the covariance matrix of each state
-        
-        self.gaussian_mu0 = np.zeros((1, self.dim))
-        self.gaussian_k0 = 1
 
-        self.wishart_T0 = np.eye(self.dim)
-        self.wishart_v0 = 1
+        self.iid = iid
+        self.dim = len(obsvar_names)
+        if self.iid:
+            self.means = np.zeros((self.num_states, self.dim))
+            self.vars = np.zeros((self.num_states, self.dim))
+            # define priors here
+            self.gaussian_mu0 = 0
+            self.gaussian_k0 = 1
+            self.gamma_alpha0 = 0
+            self.gamma_beta0 = 1 # the rate parameter
+        else:
+            self.means = np.zeros((self.num_states, self.dim)) # the mean vector of each state
+            self.covs = np.array([np.eye(self.dim) for _ in xrange(self.num_states)]) # the covariance matrix of each state
+        
+            self.gaussian_mu0 = np.zeros((1, self.dim))
+            self.gaussian_k0 = 1
+
+            self.wishart_T0 = np.eye(self.dim)
+            self.wishart_v0 = 1
 
     def do_inference(self, output_folder = None):
         """Perform inference on parameters.
@@ -143,7 +154,6 @@ class GaussianHMMSampler(HMMSampler):
 
             state_logp[nth] = trans_prev_logp + trans_next_logp
 
-            #print(self.annealing_temp); raw_input()
             # resample state
             new_states[nth] = sample(a = self.uniq_states,
                                      p = lognormalize(x = state_logp[nth] + emit_logp[nth], temp = self.annealing_temp))
