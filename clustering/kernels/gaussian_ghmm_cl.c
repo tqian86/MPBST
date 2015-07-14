@@ -125,7 +125,9 @@ kernel void resample_state(global int *states,
    tional probabilities between states
 */
 kernel void calc_joint_logp(global float *obs,
-			    global int *states,
+			    global uint *group_Ns,
+			    global uint *group_start_idx,
+			    global uint *group_states,
 			    global float *trans_p,
 			    global float *means,
 			    global float *cov_dets,
@@ -133,9 +135,17 @@ kernel void calc_joint_logp(global float *obs,
 			    global float *joint_logp,
 			    uint K, uint dim) {
   
-  uint obs_idx = get_global_id(0); // get the index of the observation of interest
-  uint state_idx = states[obs_idx] - 1;
+  uint group_idx = get_global_id(0); // get the index of the current group (i.e., the index of each sequence)
+  uint within_group_obs_idx = get_global_id(1);
+
+  // don't do anything if this state is padded
+  if (within_group_obs_idx >= group_Ns[group_idx]) return; 
+
+  //uint padded_seq_length = get_global_size(1); // each group is padded to have this many states (some are not used)
+  uint obs_idx = group_start_idx[group_idx] + within_group_obs_idx;
+  uint state_idx = group_states[obs_idx] - 1;
   
+  // calculate the joint logp of the state of the current group
   float logp = 0;
   logp += dim * log(2 * M_PI_F) + log(cov_dets[state_idx]);
 
@@ -153,8 +163,8 @@ kernel void calc_joint_logp(global float *obs,
   logp = -0.5f * (logp + mat_mul);
 
   // calculate transitional probabilities
-  uint prev_state_idx = states[(obs_idx - 1) * (obs_idx > 0)] - 1;
-  logp = logp + (obs_idx > 0) * log(trans_p[prev_state_idx * K + state_idx]) +
-    (obs_idx == 0) * log(1.0f / K);
+  uint prev_state_idx = group_states[(obs_idx - 1) * (within_group_obs_idx > 0)] - 1;
+  logp = logp + (within_group_obs_idx > 0) * log(trans_p[prev_state_idx * K + state_idx]) +
+    (within_group_obs_idx == 0) * log(1.0f / K);
   joint_logp[obs_idx] = logp;
 }

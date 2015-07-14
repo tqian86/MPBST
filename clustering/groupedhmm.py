@@ -57,13 +57,12 @@ class GroupedHMMSampler(HMMSampler):
         self.N = self.group_Ns.sum()
         self.group_obs = [self.data.ix[self.data[group] == self.group_levels[lv_idx], obsvar_names].values
                           for lv_idx in xrange(len(self.group_levels))]
-        #print(self.group_obs[0]); print(self.data.ix[self.data[group] == self.group_levels[0]]); raw_input()
         self.group_states = [np.random.randint(low = 1, high = self.num_states + 1, size = self.group_Ns[lv_idx]).astype(np.int32)
                              for lv_idx in xrange(len(self.group_levels))]
 
         if self.cl_mode:
             self.d_obs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
-                                   hostbuf = np.vstack(self.group_obs).astype(np.float32))
+                                   hostbuf = np.array(np.vstack(self.group_obs), order='C').astype(np.float32))
             self.d_group_Ns = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
                                         hostbuf = self.group_Ns.astype(np.int32))
             self.d_group_states = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR,
@@ -309,18 +308,23 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
             gpu_begin_time = time()
 
             joint_logp = np.empty(self.N, dtype=np.float32)
+            # calculate the starting index of each group
+            group_start_idx = np.hstack(([0], self.group_Ns.cumsum()[:len(self.group_Ns) - 1]))
+
+            d_group_Ns = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = self.group_Ns.astype(np.int32))
+            d_group_start_idx = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = group_start_idx.astype(np.int32))
+            d_group_states = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = np.hstack(group_states).astype(np.int32))
             d_means = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = means.astype(np.float32))
-            d_states = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = states.astype(np.int32))
             d_trans_p = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = trans_p.astype(np.float32))
             d_cov_dets = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = np.linalg.det(covs).astype(np.float32))
             d_cov_invs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = np.linalg.inv(covs).astype(np.float32))
             d_joint_logp = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR, hostbuf = joint_logp)
 
-            self.cl_prg.calc_joint_logp(self.queue, joint_logp.shape, None,
-                                        self.d_obs, d_states, d_trans_p, d_means, d_cov_dets, d_cov_invs, d_joint_logp,
+            # we are going to launch NUMBER_OF_GROUPS by MAX_NUMBER_OF_STATES threads
+            self.cl_prg.calc_joint_logp(self.queue, (self.group_Ns.shape[0], self.group_Ns.max()), None,
+                                        self.d_obs, d_group_Ns, d_group_start_idx, d_group_states, d_trans_p, d_means, d_cov_dets, d_cov_invs, d_joint_logp,
                                         np.int32(self.num_states), np.int32(self.dim))
             cl.enqueue_copy(self.queue, joint_logp, d_joint_logp)
-
             self.gpu_time += time() - gpu_begin_time
         else:
             joint_logp = []
@@ -332,7 +336,7 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
                 joint_logp.append(np.empty(N))
                 joint_logp[lv_idx][0] = np.log(1 / self.num_states)
                 joint_logp[lv_idx][1:] = np.log(trans_p[states[:N-1] - 1, states[1:] - 1])
-
+                
                 joint_logp[lv_idx] = joint_logp[lv_idx] + \
                                      np.array([multivariate_normal.logpdf(obs[i], mean = means[states[i]-1], cov = covs[states[i]-1])
                                                for i in xrange(N)])
@@ -359,7 +363,7 @@ class GaussianGroupedHMMSampler(GroupedHMMSampler):
 
 # temporary debug code
 if __name__ == '__main__':
-    hs = GaussianGroupedHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=False, debug_mumble = True)
+    hs = GaussianGroupedHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=True, debug_mumble = True)
     hs.read_csv('./toydata/speed.csv.gz', obsvar_names = ['rt'], group = 'corr')
     gt, tt = hs.do_inference()
     print(gt, tt)
