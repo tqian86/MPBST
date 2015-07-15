@@ -30,7 +30,7 @@ class HMMSampler(BaseSampler):
         self.trans_p_matrix = np.random.random((num_states, num_states))
         self.trans_p_matrix = self.trans_p_matrix / self.trans_p_matrix.sum(axis=1)
         
-    def read_csv(self, filepath, obsvar_names = ['obs'], header = True):
+    def read_csv(self, filepath, obs_vars = ['obs'], header = True):
         """Read data from a csv file and check for observations.
         """
         self.source_filepath = filepath
@@ -38,7 +38,7 @@ class HMMSampler(BaseSampler):
         self.source_filename = os.path.basename(filepath).split('.')[0]
         
         self.data = pd.read_csv(filepath, compression = 'gzip')
-        self.obs = self.data[obsvar_names]
+        self.obs = self.data[obs_vars]
         self.N = self.data.shape[0]
         self.states = np.random.randint(low = 1, high = self.num_states + 1, size = self.N).astype(np.int32)
 
@@ -63,31 +63,44 @@ class GaussianHMMSampler(HMMSampler):
             program_str = open(pkg_dir + 'MPBST/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
         
-    def read_csv(self, filepath, obsvar_names = ['obs'], iid = False, header = True):
+    def read_csv(self, filepath, obs_vars = ['obs'], header = True):
         """Read data from a csv file and check for observations.
+
+        The specification of observation variables follows this rule: top-level variables and 
+        variable groups are assumed to be i.i.d. Second-level (inside a sublist) variables are 
+        assumed to be multivariate normals. For example:
+
+        obs_vars = ['obs1', 'obs2']
+
+        implies that the emission probability distribution is a joint of two normals, while
+
+        obs_vars = [['obs1', 'obs2']] 
+
+        implies that a two-dimensional normal serves as the emission probability distribution.
         """
-        HMMSampler.read_csv(self, filepath, obsvar_names, header)
-
-        self.iid = iid
-        self.dim = len(obsvar_names)
-        if self.iid:
-            self.means = np.zeros((self.num_states, self.dim))
-            self.vars = np.zeros((self.num_states, self.dim))
-            # define priors here
-            self.gaussian_mu0 = 0
-            self.gaussian_k0 = 1
-            self.gamma_alpha0 = 0
-            self.gamma_beta0 = 1 # the rate parameter
-        else:
-            self.means = np.zeros((self.num_states, self.dim)) # the mean vector of each state
-            self.covs = np.array([np.eye(self.dim) for _ in xrange(self.num_states)]) # the covariance matrix of each state
+        flat_obs_vars = np.hstack(obs_vars)
+        HMMSampler.read_csv(self, filepath, flat_obs_vars, header)
+        self.obs_dim = len(flat_obs_vars)
+        self.obs_vars = obs_vars
         
-            self.gaussian_mu0 = np.zeros((1, self.dim))
-            self.gaussian_k0 = 1
+        self.means = [np.zeros(len(_)) if type(_) is list else np.zeros(1) for _ in obs_vars]
+        self.means = [self.means] * self.num_states
+        self.covs = [np.eye(len(_)) if type(_) is list else np.eye(1) for _ in obs_vars]
+        self.covs = [self.covs] * self.num_states
+        return
 
-            self.wishart_T0 = np.eye(self.dim)
-            self.wishart_v0 = 1
+    def _gaussian_mu0(self, dim):
+        return np.zeros((1, dim))
 
+    def _gaussian_k0(self, dim):
+        return 1
+
+    def _wishart_T0(self, dim):
+        return np.eye(dim)
+
+    def _wishart_v0(self, dim):
+        return 1
+        
     def do_inference(self, output_folder = None):
         """Perform inference on parameters.
         """
@@ -96,19 +109,19 @@ class GaussianHMMSampler(HMMSampler):
         else:
             output_folder += '/'
 
-        self.sample_fp = gzip.open(output_folder + '{0}-gaussian-hmm-state-means-covs.csv.gz'.format(self.source_filename), 'w')
+        self.sample_fp = gzip.open(output_folder + '{0}-gaussian-hmm-samples.csv.gz'.format(self.source_filename), 'w')
 
         begin_time = time()
         for i in xrange(1, self.niter+1):
             self.set_temperature(iteration = i)
             if self.cl_mode:
-                new_means, new_covs = self._infer_means_covs()
-                new_trans_p = self._infer_trans_p()
                 new_states = self._infer_states()                
-            else:
                 new_means, new_covs = self._infer_means_covs()
                 new_trans_p = self._infer_trans_p()
+            else:
                 new_states = self._infer_states()
+                new_means, new_covs = self._infer_means_covs()
+                new_trans_p = self._infer_trans_p()
 
             if self.record_best:
                 if self.auto_save_sample((new_means, new_covs, new_trans_p, new_states)):
@@ -135,8 +148,11 @@ class GaussianHMMSampler(HMMSampler):
         # emission probabilities can be calculated in one pass
         state_logp = np.empty((self.N, self.num_states))
         emit_logp = np.empty((self.N, self.num_states))
-        for state in self.uniq_states:
-            emit_logp[:,state-1] = multivariate_normal.logpdf(self.obs, mean = self.means[state-1], cov = self.covs[state-1])
+        for obs_set_idx in xrange(len(self.obs_vars)):
+            obs_set = self.obs_vars[obs_set_idx]
+            for state in self.uniq_states:
+                if obs_set_idx == 0: emit_logp[:, state-1] = 0
+                emit_logp[:,state-1] += multivariate_normal.logpdf(self.obs[obs_set], mean = self.means[state-1][obs_set_idx], cov = self.covs[state-1][obs_set_idx])
 
         trans_logp = np.log(self.trans_p_matrix)
         # state probabilities need to be interated over
@@ -177,7 +193,7 @@ class GaussianHMMSampler(HMMSampler):
 
         self.cl_prg.calc_emit_logp(self.queue, emit_logp.shape, None,
                                    self.d_obs, d_means, d_cov_dets, d_cov_invs, d_emit_logp,
-                                   np.int32(self.dim))
+                                   np.int32(self.obs_dim))
         
         d_trans_p_matrix = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = self.trans_p_matrix.astype(np.float32))
         d_state_logp = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR, hostbuf = state_logp)
@@ -212,44 +228,60 @@ class GaussianHMMSampler(HMMSampler):
     def _infer_means_covs(self):
         """Infer the means of each hidden state without OpenCL.
         """
-        obs = np.array(self.obs)
-        new_means = np.empty_like(self.means)
-        new_covs = np.empty_like(self.covs)
-        
-        for state in self.uniq_states:
-            # get observations currently assigned to this state
-            cluster_obs = obs[np.where(self.states == state)]
-            n = cluster_obs.shape[0]
+        new_means = copy.deepcopy(self.means)
+        new_covs = copy.deepcopy(self.covs)
+        #new_means = [np.zeros(len(_)) if type(_) is list else np.zeros(1) for _ in self.obs_vars]
+        #new_means = [new_means] * self.num_states
+        #new_covs = [np.eye(len(_)) if type(_) is list else np.eye(1) for _ in self.obs_vars]
+        #new_covs = [new_covs] * self.num_states
 
-            # compute sufficient statistics
-            if n == 0:
-                mu = np.zeros(self.dim)
-                cluster_obs = np.zeros((1, self.dim))
-            else:
-                mu = cluster_obs.mean(axis = 0)
+        for obs_set_idx in xrange(len(self.obs_vars)):
+            obs_set = self.obs_vars[obs_set_idx]
+            if type(obs_set) is str: obs_dim = 1
+            else: obs_dim = len(obs_set)
+            obs = np.array(self.obs[obs_set])
 
-            obs_deviance = cluster_obs - mu
-            mu0_deviance = mu - self.gaussian_mu0
-            cov_obs = np.dot(obs_deviance.T, obs_deviance)
-            cov_mu0 = np.dot(mu0_deviance.T, mu0_deviance)
+            for state in self.uniq_states:
+                
+                # get observations currently assigned to this state
+                cluster_obs = obs[np.where(self.states == state)]
+                n = cluster_obs.shape[0]
+                # compute sufficient statistics
+                if n == 0:
+                    mu = np.zeros(obs_dim)
+                    cluster_obs = np.zeros((1, obs_dim))
+                else:
+                    mu = cluster_obs.mean(axis = 0)
 
-            v_n = self.wishart_v0 + n
-            k_n = self.gaussian_k0 + n
-            T_n = self.wishart_T0 + cov_obs + cov_mu0 * self.gaussian_k0 * n / k_n
+                obs_deviance = cluster_obs - mu
+                mu0_deviance = mu - self._gaussian_mu0(dim = obs_dim)
+                cov_obs = np.dot(obs_deviance.T, obs_deviance)
+                cov_mu0 = np.dot(mu0_deviance.T, mu0_deviance)
 
-            # new mu is sampled from a multivariate t with the following parameters
-            df = v_n - self.dim + 1
-            mu_n = (self.gaussian_k0 * self.gaussian_mu0 + n * mu) / k_n
-            Sigma = T_n / (k_n * df)
+                v_n = self._wishart_v0(obs_dim) + n
+                k_n = self._gaussian_k0(obs_dim) + n
+                T_n = self._wishart_T0(obs_dim) + cov_obs + cov_mu0 * self._gaussian_k0(obs_dim) * n / k_n
 
-            # means and covs are sampled independently since close solutions exist and
-            # this reduces autocorrelation between samples
+                # new mu is sampled from a multivariate t with the following parameters
+                df = v_n - obs_dim + 1
+                mu_n = (self._gaussian_k0(obs_dim) * self._gaussian_mu0(obs_dim) + n * mu) / k_n
+                Sigma = T_n / (k_n * df)
+
+                # means and covs are sampled independently since close solutions exist and
+                # this reduces autocorrelation between samples
             
-            # resample the new mean vector
-            new_means[state-1] = multivariate_t(mu = mu_n, Sigma = Sigma, df = df)
-            # resample the covariance matrix
-            new_covs[state-1] = np.linalg.inv(wishart(Sigma = np.linalg.inv(T_n), df = v_n))
+                # resample the new mean vector
+                # the bug here is actually related to how these values are created using *3, which is only copying the reference
+                print(state,new_means[state-1], new_means)
+                new_means[state-1][obs_set_idx] = multivariate_t(mu = mu_n, Sigma = Sigma, df = df)
+                print(new_means[state-1][obs_set_idx])
+                # resample the covariance matrix
+                new_covs[state-1][obs_set_idx] = np.linalg.inv(wishart(Sigma = np.linalg.inv(T_n), df = v_n))
 
+        print(new_means)
+        print(new_covs)
+        sys.exit(0)
+                
         # a hacky but surprisingly effective way to alleviate label switching
         reindex = new_means[:,0].argsort()
         new_means = new_means[reindex]
@@ -292,7 +324,7 @@ class GaussianHMMSampler(HMMSampler):
 
             self.cl_prg.calc_joint_logp(self.queue, joint_logp.shape, None,
                                         self.d_obs, d_states, d_trans_p, d_means, d_cov_dets, d_cov_invs, d_joint_logp,
-                                        np.int32(self.num_states), np.int32(self.dim))
+                                        np.int32(self.num_states), np.int32(self.obs_dim))
             cl.enqueue_copy(self.queue, joint_logp, d_joint_logp)
             self.gpu_time += time() - gpu_begin_time
 
@@ -310,15 +342,15 @@ class GaussianHMMSampler(HMMSampler):
         """Save the means and covariance matrices from the current iteration.
         """
         if not self.header_written: 
-            header = ['iteration', 'loglik', 'dimension', 'state'] + ['mu_{0:d}'.format(_) for _ in range(1, self.dim+1)]
-            header += ['cov_{0:d}_{1:d}'.format(*_) for _ in itertools.product(*[range(1, self.dim+1)] * 2)]
+            header = ['iteration', 'loglik', 'dimension', 'state'] + ['mu_{0:d}'.format(_) for _ in range(1, self.obs_dim+1)]
+            header += ['cov_{0:d}_{1:d}'.format(*_) for _ in itertools.product(*[range(1, self.obs_dim+1)] * 2)]
             header += ['trans_p_to_{0:d}'.format(_) for _ in self.uniq_states]
             header += ['has_obs_{0:d}'.format(_) for _ in range(1, self.N + 1)]
             print(*header, sep = ',', file = self.sample_fp)
             self.header_written = True
 
         for state in self.uniq_states:
-            row = [iteration, self.loglik, self.dim, state] + list(self.means[state-1]) + list(np.ravel(self.covs[state-1])) + list(np.ravel(self.trans_p_matrix[state-1]))
+            row = [iteration, self.loglik, self.obs_dim, state] + list(self.means[state-1]) + list(np.ravel(self.covs[state-1])) + list(np.ravel(self.trans_p_matrix[state-1]))
             row += list((self.states == state).astype(np.bool).astype(np.int0))
             print(*row, sep = ',', file = self.sample_fp)
                 
@@ -326,7 +358,7 @@ class GaussianHMMSampler(HMMSampler):
     
 
 if __name__ == '__main__':
-    hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = False, cl_mode=True, debug_mumble = True)
-    hs.read_csv('./toydata/speed.csv.gz', obsvar_names = ['rt'])
+    hs = GaussianHMMSampler(num_states = 3, niter = 2000, record_best = False, cl_mode=True, debug_mumble = True)
+    hs.read_csv('./toydata/speed.csv.gz', obs_vars = ['rt'])
     gt, tt = hs.do_inference()
     print(gt, tt)
