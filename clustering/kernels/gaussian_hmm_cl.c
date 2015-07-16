@@ -1,3 +1,4 @@
+/*
 static float sum(global float *arr, int start, int length) {
   float result = 0;
   for (int i = start; i < start + length; i++) {
@@ -38,11 +39,13 @@ static uint sample(uint a_size, global uint *a, global float *p, int start, floa
   }
   return a[a_size - 1];
 }
+*/
 
 /* 
    calculate the log emisission probability of an observation (obs),
    given the state (work-group dim) and its sufficient stats (means, covs)
 */
+/*
 kernel void calc_emit_logp(global float *obs,
 			   global float *means,
 			   global float *cov_dets,
@@ -72,10 +75,11 @@ kernel void calc_emit_logp(global float *obs,
   emit_logp[obs_idx * K + state_idx] = -0.5f * (logp + mat_mul);
   
 }
-
+*/
 /*
   calculate the log state probability of each state
 */
+/*
 kernel void calc_state_logp(global int *states,
 			    global float *trans_p_matrix,
 			    global float *state_logp,
@@ -93,8 +97,9 @@ kernel void calc_state_logp(global int *states,
   state_logp[obs_idx * num_states + state_idx] = trans_prev_logp + trans_next_logp;
   
 }
-
+*/
 /* resample states */
+/*
 kernel void resample_state(global int *states,
 			   global float *state_logp,
 			   global float *emit_logp,
@@ -118,7 +123,7 @@ kernel void resample_state(global int *states,
   }
   states[obs_idx] = num_states;
 }
-
+*/
 /* 
    calculate the log joint probability of an hmm model, which incldues
    the emisission probability of an observation (obs), and the transi-
@@ -130,31 +135,39 @@ kernel void calc_joint_logp(global float *obs,
 			    global float *means,
 			    global float *cov_dets,
 			    global float *cov_invs,
+			    global float *var_set_dim,
+			    global float *var_set_linear_offset,
+			    global float *var_set_sq_offset,
 			    global float *joint_logp,
-			    uint K, uint dim) {
+			    uint num_state, uint num_var_set, uint num_var, uint num_cov_var) {
   
   uint obs_idx = get_global_id(0); // get the index of the observation of interest
   uint state_idx = states[obs_idx] - 1;
+
+  uint vs_idx = get_global_id(1); // get the index of the variable set
+  uint vs_dim = var_set_dim[vs_idx]; // dimension of the variable set
+  uint vs_offset = var_set_linear_offset[vs_idx];
+  uint vs_sq_offset = var_set_sq_offset[vs_idx];
   
   float logp = 0;
-  logp += dim * log(2 * M_PI_F) + log(cov_dets[state_idx]);
+  logp += vs_dim * log(2 * M_PI_F) + log(cov_dets[state_idx * num_var_set + vs_idx]);
 
   // calcualte (x - mu).T %*% inv(cov) %*% (x - mu)
   float mat_mul = 0.0f;
   float mat_inner;
-  for (uint i = 0; i < dim; i++) {
+  for (uint i = 0; i < vs_dim; i++) {
     mat_inner = 0.0f;
-    for (uint j = 0; j < dim; j++) {
-      mat_inner += (obs[obs_idx * dim + j] - means[state_idx * dim + j]) * 
-	cov_invs[state_idx * dim * dim + j * dim + i];
+    for (uint j = 0; j < vs_dim; j++) {
+      mat_inner += (obs[obs_idx * num_var + vs_offset + j] - means[state_idx * num_var + vs_offset + j]) * 
+	cov_invs[state_idx * num_cov_var + vs_sq_offset + j * vs_dim + i];
     }
-    mat_mul += mat_inner * (obs[obs_idx * dim + i] - means[state_idx * dim + i]);
+    mat_mul += mat_inner * (obs[obs_idx * num_var + vs_offset + i] - means[state_idx * num_var + vs_offset + i]);
   }
   logp = -0.5f * (logp + mat_mul);
 
   // calculate transitional probabilities
   uint prev_state_idx = states[(obs_idx - 1) * (obs_idx > 0)] - 1;
-  logp = logp + (obs_idx > 0) * log(trans_p[prev_state_idx * K + state_idx]) +
-    (obs_idx == 0) * log(1.0f / K);
+  logp = logp + (obs_idx > 0) * log(trans_p[prev_state_idx * num_state + state_idx]) +
+    (obs_idx == 0) * log(1.0f / num_state);
   joint_logp[obs_idx] = logp;
 }

@@ -80,7 +80,9 @@ class GaussianHMMSampler(HMMSampler):
         """
         flat_obs_vars = np.hstack(obs_vars)
         HMMSampler.read_csv(self, filepath, flat_obs_vars, header)
-        self.obs_dim = len(flat_obs_vars)
+        self.num_var = len(flat_obs_vars)
+        self.num_cov_var = np.sum([len(_) ** 2 if type(_) is list else 1 for _ in obs_vars])
+        self.num_var_set = len(obs_vars)
         self.obs_vars = obs_vars
         
         self.means = [[np.zeros(len(_)) if type(_) is list else np.zeros(1) for _ in obs_vars] for s in xrange(self.num_states)]
@@ -143,19 +145,22 @@ class GaussianHMMSampler(HMMSampler):
         # copy the states first, this is needed for record_best mode
         new_states = np.empty_like(self.states); new_states[:] = self.states[:]
         
-        # emission probabilities can be calculated in one pass
+        # set up grid for storing log probabilities
         state_logp = np.empty((self.N, self.num_states))
         emit_logp = np.empty((self.N, self.num_states))
-        for obs_set_idx in xrange(len(self.obs_vars)):
-            obs_set = self.obs_vars[obs_set_idx]
-            for state in self.uniq_states:
-                if obs_set_idx == 0: emit_logp[:, state-1] = 0
-                emit_logp[:,state-1] += multivariate_normal.logpdf(self.obs[obs_set],
-                                                                   mean = self.means[state-1][obs_set_idx],
-                                                                   cov = self.covs[state-1][obs_set_idx])
 
-        trans_logp = np.log(self.trans_p_matrix)
+        # emission probabilities can be calculated in one pass
+        for var_set_idx in xrange(len(self.obs_vars)):
+            var_set = self.obs_vars[var_set_idx]
+            obs_set = np.array(self.obs[var_set])
+            for state in self.uniq_states:
+                if var_set_idx == 0: emit_logp[:, state-1] = 0
+                emit_logp[:,state-1] += multivariate_normal.logpdf(obs_set,
+                                                                   mean = self.means[state-1][var_set_idx],
+                                                                   cov = self.covs[state-1][var_set_idx])
+
         # state probabilities need to be interated over
+        trans_logp = np.log(self.trans_p_matrix)
         for nth in xrange(self.N):
 
             if nth == 0:
@@ -193,7 +198,7 @@ class GaussianHMMSampler(HMMSampler):
 
         self.cl_prg.calc_emit_logp(self.queue, emit_logp.shape, None,
                                    self.d_obs, d_means, d_cov_dets, d_cov_invs, d_emit_logp,
-                                   np.int32(self.obs_dim))
+                                   np.int32(self.num_var))
         
         d_trans_p_matrix = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = self.trans_p_matrix.astype(np.float32))
         d_state_logp = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR, hostbuf = state_logp)
@@ -228,18 +233,14 @@ class GaussianHMMSampler(HMMSampler):
     def _infer_means_covs(self):
         """Infer the means of each hidden state without OpenCL.
         """
-        new_means = copy.deepcopy(self.means)
-        new_covs = copy.deepcopy(self.covs)
-        #new_means = [np.zeros(len(_)) if type(_) is list else np.zeros(1) for _ in self.obs_vars]
-        #new_means = [new_means] * self.num_states
-        #new_covs = [np.eye(len(_)) if type(_) is list else np.eye(1) for _ in self.obs_vars]
-        #new_covs = [new_covs] * self.num_states
+        new_means = [[np.zeros(len(_)) if type(_) is list else np.zeros(1) for _ in self.obs_vars] for s in xrange(self.num_states)]
+        new_covs = [[np.eye(len(_)) if type(_) is list else np.eye(1) for _ in self.obs_vars] for s in xrange(self.num_states)]
 
-        for obs_set_idx in xrange(len(self.obs_vars)):
-            obs_set = self.obs_vars[obs_set_idx]
-            if type(obs_set) is str: obs_dim = 1
-            else: obs_dim = len(obs_set)
-            obs = np.array(self.obs[obs_set])
+        for var_set_idx in xrange(len(self.obs_vars)):
+            var_set = self.obs_vars[var_set_idx]
+            if type(var_set) is str: obs_dim = 1
+            else: obs_dim = len(var_set)
+            obs = np.array(self.obs[var_set])
 
             for state in self.uniq_states:
                 
@@ -271,9 +272,9 @@ class GaussianHMMSampler(HMMSampler):
                 # this reduces autocorrelation between samples
             
                 # resample the new mean vector
-                new_means[state-1][obs_set_idx][:] = multivariate_t(mu = mu_n, Sigma = Sigma, df = df)
+                new_means[state-1][var_set_idx][:] = multivariate_t(mu = mu_n, Sigma = Sigma, df = df)
                 # resample the covariance matrix
-                new_covs[state-1][obs_set_idx][:] = np.linalg.inv(wishart(Sigma = np.linalg.inv(T_n), df = v_n))
+                new_covs[state-1][var_set_idx][:] = np.linalg.inv(wishart(Sigma = np.linalg.inv(T_n), df = v_n))
                 
         # a hacky but surprisingly effective way to alleviate label switching
         m = np.array([new_means[_][0][0] for _ in xrange(self.num_states)])
@@ -307,50 +308,62 @@ class GaussianHMMSampler(HMMSampler):
         means, covs, trans_p, states = sample
 
         if self.cl_mode:
+            var_set_dim = np.array([len(_) if type(_) is list else 1 for _ in self.obs_vars])
+            var_set_linear_offset = np.hstack(([0], var_set_dim.cumsum()[:self.num_var_set - 1]))
+            var_set_sq_offset = np.hstack(([0], (var_set_dim ** 2).cumsum()[:self.num_var_set - 1]))
+
             gpu_begin_time = time()
             joint_logp = np.empty(self.N, dtype=np.float32)
-            d_means = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = means.astype(np.float32))
+            d_means = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = np.hstack(means).flatten().astype(np.float32))
             d_states = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = states.astype(np.int32))
             d_trans_p = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = trans_p.astype(np.float32))
-            d_cov_dets = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = np.linalg.det(covs).astype(np.float32))
-            d_cov_invs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = np.linalg.inv(covs).astype(np.float32))
+            d_cov_dets = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+                                   hostbuf = np.array([np.linalg.det(cov) for cov in covs], dtype=np.float32))
+            d_cov_invs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+                                   hostbuf = np.hstack([np.linalg.inv(cov).flatten() for cov in covs]).astype(np.float32))
+            d_var_set_dim = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = var_set_dim.astype(np.float32))
+            d_var_set_linear_offset = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = var_set_linear_offset.astype(np.float32))
+            d_var_set_sq_offset = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = var_set_sq_offset.astype(np.float32))
+            
             d_joint_logp = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR, hostbuf = joint_logp)
 
-            self.cl_prg.calc_joint_logp(self.queue, joint_logp.shape, None,
-                                        self.d_obs, d_states, d_trans_p, d_means, d_cov_dets, d_cov_invs, d_joint_logp,
-                                        np.int32(self.num_states), np.int32(self.obs_dim))
+            self.cl_prg.calc_joint_logp(self.queue, (self.N, self.num_var_set), None,
+                                        self.d_obs, d_states, d_trans_p, d_means, d_cov_dets, d_cov_invs,
+                                        d_var_set_dim, d_var_set_linear_offset, d_var_set_sq_offset, d_joint_logp,
+                                        np.int32(self.num_states), np.int32(self.num_var_set), np.int32(self.num_var), np.int32(self.num_cov_var))
             cl.enqueue_copy(self.queue, joint_logp, d_joint_logp)
             self.gpu_time += time() - gpu_begin_time
 
         else:
             joint_logp = np.empty(self.N)
+            
             # calculate transition probabilities first
             joint_logp[0] = np.log(1 / self.num_states)
             joint_logp[1:] = np.log(trans_p[states[:self.N-1] - 1, states[1:] - 1])
-            # emission probs
-            for obs_set_idx in xrange(len(self.obs_vars)):
-                obs_set = self.obs_vars[obs_set_idx]
-                joint_logp += np.array([multivariate_normal.logpdf(self.obs[obs_set][i],
-                                                                   mean = means[states[i]-1][obs_set_idx],
-                                                                   cov = covs[states[i]-1][obs_set_idx])
-                                        for i in xrange(self.N)])
-                #joint_logp = joint_logp + np.array([multivariate_normal.logpdf(obs[i], mean = means[states[i]-1], cov = covs[states[i]-1]) for i in xrange(self.N)])
 
+            # then emission probs
+            for var_set_idx in xrange(len(self.obs_vars)):
+                var_set = self.obs_vars[var_set_idx]
+                obs_set = np.array(self.obs[var_set])
+                joint_logp += np.array([multivariate_normal.logpdf(obs_set[i],
+                                                                   mean = means[states[i]-1][var_set_idx],
+                                                                   cov = covs[states[i]-1][var_set_idx])
+                                        for i in xrange(self.N)])
         return joint_logp.sum()
 
     def _save_sample(self, iteration):
         """Save the means and covariance matrices from the current iteration.
         """
         if not self.header_written: 
-            header = ['iteration', 'loglik', 'dimension', 'state'] + ['mu_{0:d}'.format(_) for _ in range(1, self.obs_dim+1)]
-            header += ['cov_{0:d}_{1:d}'.format(*_) for _ in itertools.product(*[range(1, self.obs_dim+1)] * 2)]
+            header = ['iteration', 'loglik', 'dimension', 'state'] + ['mu_{0:d}'.format(_) for _ in range(1, self.num_var+1)]
+            header += ['cov_{0:d}_{1:d}'.format(*_) for _ in itertools.product(*[range(1, self.num_var+1)] * 2)]
             header += ['trans_p_to_{0:d}'.format(_) for _ in self.uniq_states]
             header += ['has_obs_{0:d}'.format(_) for _ in range(1, self.N + 1)]
             print(*header, sep = ',', file = self.sample_fp)
             self.header_written = True
 
         for state in self.uniq_states:
-            row = [iteration, self.loglik, self.obs_dim, state] + list(self.means[state-1]) + list(np.ravel(self.covs[state-1])) + list(np.ravel(self.trans_p_matrix[state-1]))
+            row = [iteration, self.loglik, self.num_var, state] + list(self.means[state-1]) + list(np.ravel(self.covs[state-1])) + list(np.ravel(self.trans_p_matrix[state-1]))
             row += list((self.states == state).astype(np.bool).astype(np.int0))
             print(*row, sep = ',', file = self.sample_fp)
                 
@@ -358,7 +371,7 @@ class GaussianHMMSampler(HMMSampler):
     
 
 if __name__ == '__main__':
-    hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=False, debug_mumble = True)
+    hs = GaussianHMMSampler(num_states = 2, niter = 1000, record_best = False, cl_mode=True, debug_mumble = True)
     hs.read_csv('./toydata/speed.csv.gz', obs_vars = ['rt'])
     gt, tt = hs.do_inference()
     print(gt, tt)
