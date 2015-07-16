@@ -83,10 +83,8 @@ class GaussianHMMSampler(HMMSampler):
         self.obs_dim = len(flat_obs_vars)
         self.obs_vars = obs_vars
         
-        self.means = [np.zeros(len(_)) if type(_) is list else np.zeros(1) for _ in obs_vars]
-        self.means = [self.means] * self.num_states
-        self.covs = [np.eye(len(_)) if type(_) is list else np.eye(1) for _ in obs_vars]
-        self.covs = [self.covs] * self.num_states
+        self.means = [[np.zeros(len(_)) if type(_) is list else np.zeros(1) for _ in obs_vars] for s in xrange(self.num_states)]
+        self.covs = [[np.eye(len(_)) if type(_) is list else np.eye(1) for _ in obs_vars] for s in xrange(self.num_states)]
         return
 
     def _gaussian_mu0(self, dim):
@@ -152,7 +150,9 @@ class GaussianHMMSampler(HMMSampler):
             obs_set = self.obs_vars[obs_set_idx]
             for state in self.uniq_states:
                 if obs_set_idx == 0: emit_logp[:, state-1] = 0
-                emit_logp[:,state-1] += multivariate_normal.logpdf(self.obs[obs_set], mean = self.means[state-1][obs_set_idx], cov = self.covs[state-1][obs_set_idx])
+                emit_logp[:,state-1] += multivariate_normal.logpdf(self.obs[obs_set],
+                                                                   mean = self.means[state-1][obs_set_idx],
+                                                                   cov = self.covs[state-1][obs_set_idx])
 
         trans_logp = np.log(self.trans_p_matrix)
         # state probabilities need to be interated over
@@ -271,21 +271,15 @@ class GaussianHMMSampler(HMMSampler):
                 # this reduces autocorrelation between samples
             
                 # resample the new mean vector
-                # the bug here is actually related to how these values are created using *3, which is only copying the reference
-                print(state,new_means[state-1], new_means)
-                new_means[state-1][obs_set_idx] = multivariate_t(mu = mu_n, Sigma = Sigma, df = df)
-                print(new_means[state-1][obs_set_idx])
+                new_means[state-1][obs_set_idx][:] = multivariate_t(mu = mu_n, Sigma = Sigma, df = df)
                 # resample the covariance matrix
-                new_covs[state-1][obs_set_idx] = np.linalg.inv(wishart(Sigma = np.linalg.inv(T_n), df = v_n))
-
-        print(new_means)
-        print(new_covs)
-        sys.exit(0)
+                new_covs[state-1][obs_set_idx][:] = np.linalg.inv(wishart(Sigma = np.linalg.inv(T_n), df = v_n))
                 
         # a hacky but surprisingly effective way to alleviate label switching
-        reindex = new_means[:,0].argsort()
-        new_means = new_means[reindex]
-        new_covs = new_covs[reindex]
+        m = np.array([new_means[_][0][0] for _ in xrange(self.num_states)])
+        reindex = m.argsort()
+        new_means = [new_means[i] for i in reindex]
+        new_covs = [new_covs[i] for i in reindex]
         return new_means, new_covs
 
     def _infer_trans_p(self):
@@ -334,7 +328,13 @@ class GaussianHMMSampler(HMMSampler):
             joint_logp[0] = np.log(1 / self.num_states)
             joint_logp[1:] = np.log(trans_p[states[:self.N-1] - 1, states[1:] - 1])
             # emission probs
-            joint_logp = joint_logp + np.array([multivariate_normal.logpdf(obs[i], mean = means[states[i]-1], cov = covs[states[i]-1]) for i in xrange(self.N)])
+            for obs_set_idx in xrange(len(self.obs_vars)):
+                obs_set = self.obs_vars[obs_set_idx]
+                joint_logp += np.array([multivariate_normal.logpdf(self.obs[obs_set][i],
+                                                                   mean = means[states[i]-1][obs_set_idx],
+                                                                   cov = covs[states[i]-1][obs_set_idx])
+                                        for i in xrange(self.N)])
+                #joint_logp = joint_logp + np.array([multivariate_normal.logpdf(obs[i], mean = means[states[i]-1], cov = covs[states[i]-1]) for i in xrange(self.N)])
 
         return joint_logp.sum()
 
@@ -358,7 +358,7 @@ class GaussianHMMSampler(HMMSampler):
     
 
 if __name__ == '__main__':
-    hs = GaussianHMMSampler(num_states = 3, niter = 2000, record_best = False, cl_mode=True, debug_mumble = True)
+    hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=False, debug_mumble = True)
     hs.read_csv('./toydata/speed.csv.gz', obs_vars = ['rt'])
     gt, tt = hs.do_inference()
     print(gt, tt)
