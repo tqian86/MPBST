@@ -79,14 +79,16 @@ class GaussianHMMSampler(HMMSampler):
         implies that a two-dimensional normal serves as the emission probability distribution.
         """
         flat_obs_vars = np.hstack(obs_vars)
+        self.obs_vars = obs_vars; self.flat_obs_vars = flat_obs_vars
+
         HMMSampler.read_csv(self, filepath, flat_obs_vars, header)
+
         self.num_var = len(flat_obs_vars)
         self.num_cov_var = np.sum([len(_) ** 2 if type(_) is list else 1 for _ in obs_vars])
         self.num_var_set = len(obs_vars)
-        self.obs_vars = obs_vars
-        
         self.means = [[np.zeros(len(_)) if type(_) is list else np.zeros(1) for _ in obs_vars] for s in xrange(self.num_states)]
         self.covs = [[np.eye(len(_)) if type(_) is list else np.eye(1) for _ in obs_vars] for s in xrange(self.num_states)]
+        
         return
 
     def _gaussian_mu0(self, dim):
@@ -101,44 +103,6 @@ class GaussianHMMSampler(HMMSampler):
     def _wishart_v0(self, dim):
         return 1
         
-    def do_inference(self, output_folder = None):
-        """Perform inference on parameters.
-        """
-        if output_folder is None:
-            output_folder = self.source_dirname
-        else:
-            output_folder += '/'
-
-        self.sample_fp = gzip.open(output_folder + '{0}-gaussian-hmm-samples.csv.gz'.format(self.source_filename), 'w')
-
-        begin_time = time()
-        for i in xrange(1, self.niter+1):
-            self.set_temperature(iteration = i)
-            if self.cl_mode:
-                new_states = self._infer_states()                
-                new_means, new_covs = self._infer_means_covs()
-                new_trans_p = self._infer_trans_p()
-            else:
-                new_states = self._infer_states()
-                new_means, new_covs = self._infer_means_covs()
-                new_trans_p = self._infer_trans_p()
-
-            if self.record_best:
-                if self.auto_save_sample((new_means, new_covs, new_trans_p, new_states)):
-                    print('Means: ', self.means, file=sys.stderr)
-                    self.loglik = self.best_sample[1]
-                    self._save_sample(iteration = i)
-                if self.no_improvement(): break
-                self.means, self.covs, self.trans_p_matrix, self.states = new_means, new_covs, new_trans_p, new_states
-            else:
-                self.means, self.covs, self.trans_p_matrix, self.states = new_means, new_covs, new_trans_p, new_states
-                self.loglik = self._logprob((new_means, new_covs, new_trans_p, new_states))
-                self._save_sample(iteration = i)
-                
-        self.total_time += time() - begin_time
-        
-        return self.gpu_time, self.total_time
-
     def _infer_states(self):
         """Infer the state of each observation without OpenCL.
         """
@@ -351,27 +315,71 @@ class GaussianHMMSampler(HMMSampler):
                                         for i in xrange(self.N)])
         return joint_logp.sum()
 
+    def do_inference(self, output_folder = None):
+        """Perform inference on parameters.
+        """
+        if output_folder is None:
+            output_folder = self.source_dirname
+        else:
+            output_folder += '/'
+
+        # set up output samples file and write the header
+        self.sample_fp = gzip.open(output_folder + '{0}-gaussian-hmm-samples.csv.gz'.format(self.source_filename), 'w')
+        header = ['iteration', 'loglik', 'dimension', 'state'] + ['mu_{0}'.format(_) for _ in self.flat_obs_vars]
+
+        # temporary measure - list singletons
+        obs_vars = [[_] if type(_) is str else _ for _ in self.obs_vars]
+        header += ['cov_{0}_{1}'.format(*_) for _ in itertools.chain(*[itertools.product(*[_] * 2) for _ in obs_vars])]
+
+        header += ['trans_p_to_{0:d}'.format(_) for _ in self.uniq_states]
+        header += ['has_obs_{0:d}'.format(_) for _ in range(1, self.N + 1)]
+        print(*header, sep = ',', file = self.sample_fp)
+        
+        # start sampling
+        begin_time = time()
+        for i in xrange(1, self.niter+1):
+            self.set_temperature(iteration = i)
+            if self.cl_mode:
+                new_states = self._infer_states()                
+                new_means, new_covs = self._infer_means_covs()
+                new_trans_p = self._infer_trans_p()
+            else:
+                new_states = self._infer_states()
+                new_means, new_covs = self._infer_means_covs()
+                new_trans_p = self._infer_trans_p()
+
+            if self.record_best:
+                if self.auto_save_sample((new_means, new_covs, new_trans_p, new_states)):
+                    print('Means: ', self.means, file=sys.stderr)
+                    self.loglik = self.best_sample[1]
+                    self._save_sample(iteration = i)
+                if self.no_improvement(): break
+                self.means, self.covs, self.trans_p_matrix, self.states = new_means, new_covs, new_trans_p, new_states
+            else:
+                self.means, self.covs, self.trans_p_matrix, self.states = new_means, new_covs, new_trans_p, new_states
+                self.loglik = self._logprob((new_means, new_covs, new_trans_p, new_states))
+                self._save_sample(iteration = i)
+                
+        self.total_time += time() - begin_time
+        
+        return self.gpu_time, self.total_time
+
+    
     def _save_sample(self, iteration):
         """Save the means and covariance matrices from the current iteration.
         """
-        if not self.header_written: 
-            header = ['iteration', 'loglik', 'dimension', 'state'] + ['mu_{0:d}'.format(_) for _ in range(1, self.num_var+1)]
-            header += ['cov_{0:d}_{1:d}'.format(*_) for _ in itertools.product(*[range(1, self.num_var+1)] * 2)]
-            header += ['trans_p_to_{0:d}'.format(_) for _ in self.uniq_states]
-            header += ['has_obs_{0:d}'.format(_) for _ in range(1, self.N + 1)]
-            print(*header, sep = ',', file = self.sample_fp)
-            self.header_written = True
-
         for state in self.uniq_states:
-            row = [iteration, self.loglik, self.num_var, state] + list(self.means[state-1]) + list(np.ravel(self.covs[state-1])) + list(np.ravel(self.trans_p_matrix[state-1]))
+            row = [iteration, self.loglik, self.num_var, state]
+            row += list(np.hstack(self.means[state-1]))
+            row += list(np.hstack([np.ravel(_) for _ in self.covs[state-1]]))
+            row += list(np.ravel(self.trans_p_matrix[state-1]))
             row += list((self.states == state).astype(np.bool).astype(np.int0))
             print(*row, sep = ',', file = self.sample_fp)
                 
         return
-    
 
 if __name__ == '__main__':
-    hs = GaussianHMMSampler(num_states = 2, niter = 1000, record_best = False, cl_mode=True, debug_mumble = True)
+    hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = False, cl_mode=True, debug_mumble = True)
     hs.read_csv('./toydata/speed.csv.gz', obs_vars = ['rt'])
     gt, tt = hs.do_inference()
     print(gt, tt)
