@@ -51,9 +51,19 @@ class HMMSampler(BaseSampler):
         if self.cl_mode:
             self.d_obs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
                                    hostbuf = np.array(self.obs, dtype=np.float32, order='C'))
-            self.d_states = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR,
-                                      hostbuf = self.states.astype(np.int32))
-        
+            #self.d_states = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR,
+            #                          hostbuf = self.states.astype(np.int32))
+            self.d_uniq_states = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR,
+                                           hostbuf = self.uniq_states.astype(np.int32))
+
+            # set up block size = 2
+            self.block_size = 2
+            self.num_blocks = int(np.ceil(self.N / self.block_size))
+            self.num_state_combs = self.num_states ** self.block_size
+            self.state_combs = np.array(list(itertools.product(self.uniq_states, repeat=self.block_size)))
+            print(self.state_combs); raw_input()
+            self.d_state_combs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = self.state_combs.astype(np.int32))
+            
 class GaussianHMMSampler(HMMSampler):
 
     def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None, niter = 1000, thining = 0,
@@ -331,6 +341,57 @@ class GaussianHMMSampler(HMMSampler):
                                         for i in xrange(self.N)])
         return joint_logp.sum()
 
+    def _cl_infer_states_blocked(self):
+        """Infer the state of each observation without OpenCL.
+        """
+        # copy the states first, this is needed for record_best mode
+        new_states = np.empty_like(self.states); new_states[:] = self.states[:]
+
+        ### TODO: investigate the benefit of checking the number of threads and reverting to cpu version if too large
+        d_trans_p_matrix = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = self.trans_p_matrix.astype(np.float32))
+        state_comb_logp = np.empty((self.num_state_combs, self.block_size), dtype=np.float32)
+        d_state_comb_logp = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR, hostbuf = state_comb_logp)
+        
+        d_trans_p_loc = cl.LocalMemory(self.trans_p_matrix.astype(np.float32).nbytes)
+        d_states_loc = cl.LocalMemory(new_states.astype(np.float32).nbytes)
+
+        for nth_block in xrange(self.num_blocks):
+            #print(nth_block)
+            # calculate effective block size, useful for the last block
+            eff_block_size = min(self.block_size, self.N - nth_block * self.block_size)
+            d_states = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = new_states.astype(np.int32))
+            
+            # emission probabilities can be calculated in one pass
+            #state_logp = np.empty((self.N, self.num_states), dtype=np.float32)
+            #emit_logp = np.empty((self.N, self.num_states), dtype=np.float32)
+            
+            #d_means = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = self.means.astype(np.float32))
+            #d_cov_dets = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = np.linalg.det(self.covs).astype(np.float32))
+            #d_cov_invs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = np.linalg.inv(self.covs).astype(np.float32))
+            #d_emit_logp = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR, hostbuf = emit_logp.astype(np.float32))
+
+            gpu_a_time = time()
+            self.cl_prg.sample_state_blocked(self.queue, (self.block_size, self.num_state_combs), None,
+                                             self.d_obs, d_states, d_states_loc, self.d_state_combs, d_trans_p_matrix, d_trans_p_loc, d_state_comb_logp,
+                                             np.int32(nth_block), np.int32(self.block_size), np.int32(self.num_blocks),
+                                             np.int32(self.num_states), np.int32(self.N))
+            self.gpu_time += time() - gpu_a_time
+
+            cl.enqueue_copy(self.queue, state_comb_logp, d_state_comb_logp)
+            
+            # resample state
+            new_states[nth_block * self.block_size:(nth_block * self.block_size) + eff_block_size] = \
+                        sample(a = self.state_combs[:,:eff_block_size], p = lognormalize(state_comb_logp.sum(axis = 1)))
+
+        #d_rand = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+        #                   hostbuf = np.random.random(size = self.N).astype(np.float32))
+        #d_temp_logp = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR,
+        #                        hostbuf = np.empty(self.num_states, dtype=np.float32))
+
+
+            
+        return new_states
+
     def do_inference(self, output_folder = None):
         """Perform inference on parameters.
         """
@@ -354,9 +415,11 @@ class GaussianHMMSampler(HMMSampler):
         # start sampling
         begin_time = time()
         for i in xrange(1, self.niter+1):
+            print(i)
             self.set_temperature(iteration = i)
             if self.cl_mode:
-                new_states = self._infer_states()                
+                new_states = self._cl_infer_states_blocked()
+                #new_states = self._infer_states()
                 new_means, new_covs = self._infer_means_covs()
                 new_trans_p = self._infer_trans_p()
             else:
@@ -396,7 +459,8 @@ class GaussianHMMSampler(HMMSampler):
         return
 
 if __name__ == '__main__':
-    hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=True, debug_mumble = True)
+    hs = GaussianHMMSampler(num_states = 2, niter = 100, record_best = False, cl_mode=True, debug_mumble = True)
+    #hs = GaussianHMMSampler(num_states = 10, niter = 100, record_best = False, cl_mode=False, debug_mumble = True)
     hs.read_csv('./toydata/speed.csv.gz', obs_vars = ['rt'])
     gt, tt = hs.do_inference()
     print(gt, tt)
