@@ -396,7 +396,7 @@ class GaussianHMMSampler(HMMSampler):
         return
 
 if __name__ == '__main__':
-    hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=False, debug_mumble = True)
+    hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=True, debug_mumble = True)
     hs.read_csv('./toydata/speed.csv.gz', obs_vars = ['rt'])
     gt, tt = hs.do_inference()
     print(gt, tt)

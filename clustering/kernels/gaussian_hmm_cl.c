@@ -166,8 +166,7 @@ kernel void calc_joint_logp(global float *obs,
   logp = -0.5f * (logp + mat_mul);
 
   // calculate transitional probabilities
-  uint prev_state_idx = states[(obs_idx - 1) * (obs_idx > 0)] - 1;
-  logp = logp + (obs_idx > 0) * log(trans_p[prev_state_idx * num_state + state_idx]) +
-    (obs_idx == 0) * log(1.0f / num_state);
+  uint prev_state = (obs_idx > 0) * states[(obs_idx - 1) * (obs_idx > 0)]; // this will be 0 for the first observation
+  logp = logp + log(trans_p[prev_state * (num_state + 1) + (state_idx + 1)]);
   joint_logp[obs_idx] = logp;
 }
