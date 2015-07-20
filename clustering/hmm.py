@@ -27,10 +27,11 @@ class HMMSampler(BaseSampler):
         self.data = None
         self.num_states = num_states
         self.uniq_states = np.linspace(1, self.num_states, self.num_states).astype(np.int64)
-        self.trans_p_matrix = np.random.random((num_states, num_states))
+        self.trans_p_matrix = np.random.random((num_states+1, num_states+1))
         self.trans_p_matrix = self.trans_p_matrix / self.trans_p_matrix.sum(axis=1)
+        self.SEQ_BEGIN, self.SEQ_END = 1, 2
         
-    def read_csv(self, filepath, obs_vars = ['obs'], header = True):
+    def read_csv(self, filepath, obs_vars = ['obs'], group = None, header = True):
         """Read data from a csv file and check for observations.
         """
         self.source_filepath = filepath
@@ -38,8 +39,13 @@ class HMMSampler(BaseSampler):
         self.source_filename = os.path.basename(filepath).split('.')[0]
         
         self.data = pd.read_csv(filepath, compression = 'gzip')
-        self.obs = self.data[obs_vars]
-        self.N = self.data.shape[0]
+        if group is None:
+            self.obs = self.data[obs_vars]
+            self.N = self.data.shape[0]
+            self.boundary_mask = np.zeros(self.N, dtype=np.int32)
+            self.boundary_mask[0] = self.SEQ_BEGIN
+            self.boundary_mask[-1] = self.SEQ_END
+            
         self.states = np.random.randint(low = 1, high = self.num_states + 1, size = self.N).astype(np.int32)
 
         if self.cl_mode:
@@ -63,7 +69,7 @@ class GaussianHMMSampler(HMMSampler):
             program_str = open(pkg_dir + 'MPBST/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
         
-    def read_csv(self, filepath, obs_vars = ['obs'], header = True):
+    def read_csv(self, filepath, obs_vars = ['obs'], group = None, header = True):
         """Read data from a csv file and check for observations.
 
         The specification of observation variables follows this rule: top-level variables and 
@@ -81,7 +87,7 @@ class GaussianHMMSampler(HMMSampler):
         flat_obs_vars = np.hstack(obs_vars)
         self.obs_vars = obs_vars; self.flat_obs_vars = flat_obs_vars
 
-        HMMSampler.read_csv(self, filepath, flat_obs_vars, header)
+        HMMSampler.read_csv(self, filepath, obs_vars = flat_obs_vars, group = group, header = header)
 
         self.num_var = len(flat_obs_vars)
         self.num_cov_var = np.sum([len(_) ** 2 if type(_) is list else 1 for _ in obs_vars])
@@ -126,16 +132,18 @@ class GaussianHMMSampler(HMMSampler):
         # state probabilities need to be interated over
         trans_logp = np.log(self.trans_p_matrix)
         for nth in xrange(self.N):
-
-            if nth == 0:
-                trans_prev_logp = [np.log(1 / self.num_states)] * self.num_states
+            is_beginning = self.boundary_mask[nth] == self.SEQ_BEGIN
+            is_end = self.boundary_mask[nth] == self.SEQ_END
+            
+            if is_beginning:
+                trans_prev_logp = trans_logp[0, 1:]#[np.log(1 / self.num_states)] * self.num_states
             else:
-                trans_prev_logp = trans_logp[new_states[nth - 1] - 1]
+                trans_prev_logp = trans_logp[new_states[nth - 1], 1:]
 
-            if nth == self.N - 1:
-                trans_next_logp = [np.log(1)] * self.num_states
+            if is_end:
+                trans_next_logp = trans_logp[1:, 0]# * self.num_states
             else:
-                trans_next_logp = trans_logp[:, new_states[nth + 1] - 1]
+                trans_next_logp = trans_logp[1:, new_states[nth + 1]]
 
             state_logp[nth] = trans_prev_logp + trans_next_logp
 
@@ -256,13 +264,21 @@ class GaussianHMMSampler(HMMSampler):
         
         # make bigram pairs for easier counting
         pairs = zip(self.states[:self.N-1], self.states[1:])
+
+        # add also pairs made up by boundary marks 
+        begin_states = self.states[self.boundary_mask == self.SEQ_BEGIN]
+        pairs.extend(zip([0] * begin_states.shape[0], begin_states))
+        end_states = self.states[self.boundary_mask == self.SEQ_END]
+        pairs.extend(zip(end_states, [0] * begin_states.shape[0]))
+
         pair_count = Counter(pairs)
         
-        for state_from in self.uniq_states:
-            count_from_state = (self.states[:self.N-1] == state_from).sum()
-            for state_to in self.uniq_states:
-                new_trans_p_matrix[state_from - 1, state_to - 1] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + self.num_states)
-                
+        for state_from in np.insert(self.uniq_states, 0, 0):
+            count_from_state = np.sum([_[0] == state_from for _ in pairs])
+            for state_to in np.insert(self.uniq_states, 0, 0):
+                new_trans_p_matrix[state_from, state_to] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + self.num_states + 1)
+
+        #print(new_trans_p_matrix, new_trans_p_matrix.sum(axis=1)); raw_input()
         return new_trans_p_matrix
 
     def _logprob(self, sample):
@@ -302,8 +318,8 @@ class GaussianHMMSampler(HMMSampler):
             joint_logp = np.empty(self.N)
             
             # calculate transition probabilities first
-            joint_logp[0] = np.log(1 / self.num_states)
-            joint_logp[1:] = np.log(trans_p[states[:self.N-1] - 1, states[1:] - 1])
+            joint_logp[0] = trans_p[0, states[0]]
+            joint_logp[1:] = np.log(trans_p[states[:self.N-1], states[1:]])
 
             # then emission probs
             for var_set_idx in xrange(len(self.obs_vars)):
@@ -330,7 +346,7 @@ class GaussianHMMSampler(HMMSampler):
         # temporary measure - list singletons
         obs_vars = [[_] if type(_) is str else _ for _ in self.obs_vars]
         header += ['cov_{0}_{1}'.format(*_) for _ in itertools.chain(*[itertools.product(*[_] * 2) for _ in obs_vars])]
-
+        header += ['trans_p_from_bd', 'trans_p_to_bd']
         header += ['trans_p_to_{0:d}'.format(_) for _ in self.uniq_states]
         header += ['has_obs_{0:d}'.format(_) for _ in range(1, self.N + 1)]
         print(*header, sep = ',', file = self.sample_fp)
@@ -372,14 +388,15 @@ class GaussianHMMSampler(HMMSampler):
             row = [iteration, self.loglik, self.num_var, state]
             row += list(np.hstack(self.means[state-1]))
             row += list(np.hstack([np.ravel(_) for _ in self.covs[state-1]]))
-            row += list(np.ravel(self.trans_p_matrix[state-1]))
+            row += [self.trans_p_matrix[0, state], self.trans_p_matrix[state, 0]]
+            row += list(np.ravel(self.trans_p_matrix[state, 1:]))
             row += list((self.states == state).astype(np.bool).astype(np.int0))
             print(*row, sep = ',', file = self.sample_fp)
                 
         return
 
 if __name__ == '__main__':
-    hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = False, cl_mode=True, debug_mumble = True)
+    hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = True, cl_mode=False, debug_mumble = True)
     hs.read_csv('./toydata/speed.csv.gz', obs_vars = ['rt'])
     gt, tt = hs.do_inference()
     print(gt, tt)
