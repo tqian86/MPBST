@@ -30,8 +30,9 @@ class HMMSampler(BaseSampler):
         self.trans_p_matrix = np.random.random((num_states+1, num_states+1))
         self.trans_p_matrix = self.trans_p_matrix / self.trans_p_matrix.sum(axis=1)
         self.SEQ_BEGIN, self.SEQ_END = 1, 2
+        self.str_output_lines = []
         
-    def read_csv(self, filepath, obs_vars = ['obs'], group = None, header = True):
+    def read_csv(self, filepath, obs_vars = ['obs'], group = None, timestamp = None, header = True):
         """Read data from a csv file and check for observations.
         """
         self.source_filepath = filepath
@@ -39,12 +40,28 @@ class HMMSampler(BaseSampler):
         self.source_filename = os.path.basename(filepath).split('.')[0]
         
         self.data = pd.read_csv(filepath, compression = 'gzip')
+        self.N = self.data.shape[0]
+
+        # create timestamp using row number if no timestamp is supplied
+        if timestamp is None:
+            timestamp = '_time_stamp_'
+            self.data['_time_stamp_'] = range(self.data.shape[0])
+
         if group is None:
+            self.data.sort(columns = timestamp, inplace=True)
             self.obs = self.data[obs_vars]
-            self.N = self.data.shape[0]
             self.boundary_mask = np.zeros(self.N, dtype=np.int32)
             self.boundary_mask[0] = self.SEQ_BEGIN
             self.boundary_mask[-1] = self.SEQ_END
+        else:
+            self.data.sort(columns = [group, timestamp], inplace=True)
+            self.obs = self.data[obs_vars]
+            self.boundary_mask = np.zeros(self.N, dtype=np.int32)
+            rle_values, rle_lengths = zip(*[(k, len(list(g))) for k, g in itertools.groupby(self.data[group])])
+            boundary_begins = np.array(rle_lengths).cumsum() - rle_lengths
+            boundary_ends = np.array(rle_lengths).cumsum() - 1
+            self.boundary_mask[boundary_begins] = self.SEQ_BEGIN
+            self.boundary_mask[boundary_ends] = self.SEQ_END
             
         self.states = np.random.randint(low = 1, high = self.num_states + 1, size = self.N).astype(np.int32)
 
@@ -82,7 +99,7 @@ class GaussianHMMSampler(HMMSampler):
 
         implies that a two-dimensional normal serves as the emission probability distribution.
         """
-        flat_obs_vars = np.hstack(obs_vars)
+        flat_obs_vars = list(np.hstack(obs_vars))
         self.obs_vars = obs_vars; self.flat_obs_vars = flat_obs_vars
 
         HMMSampler.read_csv(self, filepath, obs_vars = flat_obs_vars, group = group, header = header)
@@ -227,6 +244,9 @@ class GaussianHMMSampler(HMMSampler):
             for state_to in np.insert(self.uniq_states, 0, 0):
                 new_trans_p_matrix[state_from, state_to] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + self.num_states + 1)
 
+        new_trans_p_matrix[0, 0] = 0
+        new_trans_p_matrix[0] = new_trans_p_matrix[0] / new_trans_p_matrix[0].sum()
+                
         return new_trans_p_matrix
 
     def _logprob(self, sample):
@@ -344,7 +364,7 @@ class GaussianHMMSampler(HMMSampler):
         return
 
 if __name__ == '__main__':
-    hs = GaussianHMMSampler(num_states = 100, niter = 100, record_best = False, cl_mode=True, debug_mumble = True)
-    hs.read_csv('./toydata/speed.csv.gz', obs_vars = ['rt'])
+    hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = False, cl_mode=True, debug_mumble = True)
+    hs.read_csv('./toydata/speed.csv.gz', obs_vars = ['rt'], group='corr')
     gt, tt = hs.do_inference()
     print(gt, tt)
