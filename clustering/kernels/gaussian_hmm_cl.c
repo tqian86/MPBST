@@ -129,10 +129,10 @@ kernel void resample_state(global int *states,
 // block sampler of states
 kernel void sample_state_blocked(global float *obs,
 				 global uint *states,
-				 local uint *states_loc,
+				 //local uint *states_loc,
 				 global uint *state_combs,
 				 global float *trans_p,
-				 local float *trans_p_loc,
+				 //local float *trans_p_loc,
 				 global float *state_comb_logp,
 				 uint nth_block,
 				 uint block_size,
@@ -140,8 +140,8 @@ kernel void sample_state_blocked(global float *obs,
 				 uint num_states,
 				 uint N) {
 
-  uint kth_within_block = get_global_id(0);
-  uint nth_comb = get_global_id(1);
+  uint kth_within_block = get_global_id(1);
+  uint nth_comb = get_global_id(0);
   uint comb_offset = nth_comb * block_size;
   uint eff_block_size = min(block_size, N - nth_block * block_size);
   
@@ -153,6 +153,7 @@ kernel void sample_state_blocked(global float *obs,
   uint is_beginning = nth_block == 0 && kth_within_block == 0;
   uint is_end = nth_block == num_blocks - 1 && kth_within_block == eff_block_size - 1;
 
+  /*
   if (get_local_id(0) == 0 && get_local_id(1) == 0) {
     for (uint i = 0; i < num_states + 1; i++) {
       for (uint j = 0; j < num_states + 1; j++) {
@@ -165,17 +166,16 @@ kernel void sample_state_blocked(global float *obs,
     //printf("Done\n");
   }
   barrier(CLK_LOCAL_MEM_FENCE);
-
+  */
   // get the state of the observation preceeding this block
-  uint prev_state = (!is_beginning) * states_loc[(!is_beginning) * (nth_block * block_size + kth_within_block - 1)];  // this will be 0 if this is the first block
+  uint prev_state = (!is_beginning) * states[(!is_beginning) * (nth_block * block_size + kth_within_block - 1)];  // this will be 0 if this is the first block
   
-  float trans_logp = log(trans_p_loc[prev_state * (num_states + 1) + state_combs[comb_offset + kth_within_block]]);
-  //trans_logp += is_end * log(trans_p_loc[state_combs[comb_offset + kth_within_block] * (num_states + 1) + 0]);
+  float trans_logp = log(trans_p[prev_state * (num_states + 1) + state_combs[comb_offset + kth_within_block]]);
+  trans_logp += is_end * log(trans_p[state_combs[comb_offset + kth_within_block] * (num_states + 1) + 0]);
   //printf("nth_block: %d, nth_comb: %d, %f\n", nth_block,  nth_comb, trans_logp);
   state_comb_logp[comb_offset + kth_within_block] = trans_logp;
   
   // calculate the emission probabilities
-  
 }
 
 

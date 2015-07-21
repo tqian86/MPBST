@@ -57,11 +57,10 @@ class HMMSampler(BaseSampler):
                                            hostbuf = self.uniq_states.astype(np.int32))
 
             # set up block size = 2
-            self.block_size = 2
+            self.block_size = 4
             self.num_blocks = int(np.ceil(self.N / self.block_size))
             self.num_state_combs = self.num_states ** self.block_size
             self.state_combs = np.array(list(itertools.product(self.uniq_states, repeat=self.block_size)))
-            print(self.state_combs); raw_input()
             self.d_state_combs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = self.state_combs.astype(np.int32))
             
 class GaussianHMMSampler(HMMSampler):
@@ -288,7 +287,6 @@ class GaussianHMMSampler(HMMSampler):
             for state_to in np.insert(self.uniq_states, 0, 0):
                 new_trans_p_matrix[state_from, state_to] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + self.num_states + 1)
 
-        #print(new_trans_p_matrix, new_trans_p_matrix.sum(axis=1)); raw_input()
         return new_trans_p_matrix
 
     def _logprob(self, sample):
@@ -344,6 +342,7 @@ class GaussianHMMSampler(HMMSampler):
     def _cl_infer_states_blocked(self):
         """Infer the state of each observation without OpenCL.
         """
+        gpu_a_time = time()
         # copy the states first, this is needed for record_best mode
         new_states = np.empty_like(self.states); new_states[:] = self.states[:]
 
@@ -352,8 +351,8 @@ class GaussianHMMSampler(HMMSampler):
         state_comb_logp = np.empty((self.num_state_combs, self.block_size), dtype=np.float32)
         d_state_comb_logp = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR, hostbuf = state_comb_logp)
         
-        d_trans_p_loc = cl.LocalMemory(self.trans_p_matrix.astype(np.float32).nbytes)
-        d_states_loc = cl.LocalMemory(new_states.astype(np.float32).nbytes)
+        #d_trans_p_loc = cl.LocalMemory(self.trans_p_matrix.astype(np.float32).nbytes)
+        #d_states_loc = cl.LocalMemory(new_states.astype(np.float32).nbytes)
 
         for nth_block in xrange(self.num_blocks):
             #print(nth_block)
@@ -370,18 +369,16 @@ class GaussianHMMSampler(HMMSampler):
             #d_cov_invs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = np.linalg.inv(self.covs).astype(np.float32))
             #d_emit_logp = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR, hostbuf = emit_logp.astype(np.float32))
 
-            gpu_a_time = time()
-            self.cl_prg.sample_state_blocked(self.queue, (self.block_size, self.num_state_combs), None,
-                                             self.d_obs, d_states, d_states_loc, self.d_state_combs, d_trans_p_matrix, d_trans_p_loc, d_state_comb_logp,
+            self.cl_prg.sample_state_blocked(self.queue, (self.num_state_combs, self.block_size), None,
+                                             self.d_obs, d_states, self.d_state_combs, d_trans_p_matrix, d_state_comb_logp,
                                              np.int32(nth_block), np.int32(self.block_size), np.int32(self.num_blocks),
                                              np.int32(self.num_states), np.int32(self.N))
-            self.gpu_time += time() - gpu_a_time
 
             cl.enqueue_copy(self.queue, state_comb_logp, d_state_comb_logp)
             
             # resample state
-            new_states[nth_block * self.block_size:(nth_block * self.block_size) + eff_block_size] = \
-                        sample(a = self.state_combs[:,:eff_block_size], p = lognormalize(state_comb_logp.sum(axis = 1)))
+            #new_states[nth_block * self.block_size:(nth_block * self.block_size) + eff_block_size] = \
+            #            sample(a = self.state_combs[:,:eff_block_size], p = lognormalize(state_comb_logp.sum(axis = 1)))
 
         #d_rand = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
         #                   hostbuf = np.random.random(size = self.N).astype(np.float32))
@@ -389,6 +386,7 @@ class GaussianHMMSampler(HMMSampler):
         #                        hostbuf = np.empty(self.num_states, dtype=np.float32))
 
 
+        self.gpu_time += time() - gpu_a_time
             
         return new_states
 
@@ -415,7 +413,6 @@ class GaussianHMMSampler(HMMSampler):
         # start sampling
         begin_time = time()
         for i in xrange(1, self.niter+1):
-            print(i)
             self.set_temperature(iteration = i)
             if self.cl_mode:
                 new_states = self._cl_infer_states_blocked()
