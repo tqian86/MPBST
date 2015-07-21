@@ -1,5 +1,56 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+"""Gibbs samplers of Hidden Markov Models with OpenCL support.
+
+This module implements Gibbs samplers of Hidden Markov Models (HMMs). An HMM is used to model the 
+sequence of hidden states that underlie a sequence of observed random outcomes. Each hidden state 
+is modeled as a probabilistic distribution that "generates" observed outcomes. Depending on the 
+specific HMM that a modeler chooses to use (e.g., GaussianHMMSampler), this probabilistic distribution 
+can be gaussian/normal, categorical, or of other forms. In addition, transition probabilities between
+hidden states are modeled as categorical distributions with beta priors, regardless of which HMM 
+sampler is used.
+
+As is standard with all tools in MPBST, this module supports at least both vanilla Gibbs sampling
+and stochastic search.
+
+OpenCL support
+---------
+The current set of HMMs come with (limited yet significantly helpful) OpenCL support. Due to the
+sequential dependencies between the states in an HMM, the overhead incurred by OpenCL commands in
+inferring states makes it an unwise strategy in speeding up the overall sampling process. Instead,
+OpenCL optimization is applied to the evaluation of the joint log probability of the inferred states
+and the data, which tends to be the most costly step of the sampling process.
+
+Usage
+-----
+Use one of the subclasses, e.g., GaussianHMMSampler, directly. The base class HMMSampler is intended for
+development only. 
+
+Initialize a sampler by constructing an HMM instance. For example,
+
+hmm = GaussianHMMSampler(num_states = 4)
+
+See docs for the list of optional arguments.
+
+Input data
+----------
+Input data can be read using the standard "read_csv" method of an initialized sampler. For example:
+
+hmm.read_csv("./data/data.csv", obs_vars = ["obs"], group = None, header = True, timestamp = None)
+
+See the docstring of read_csv for details.
+
+
+Available models:
+----------------
+- Grouped HMM with k-dimensional Gaussian/Normal emission probability distributions 
+  (K can be anything from 1 to whatever makes sense in your data)
+
+Planned models:
+--------------
+- HMM with categorical emission probability distributions
+"""
+
 
 from __future__ import print_function, division
 
@@ -33,8 +84,66 @@ class HMMSampler(BaseSampler):
         self.str_output_lines = []
         
     def read_csv(self, filepath, obs_vars = ['obs'], group = None, timestamp = None, header = True):
-        """Read data from a csv file and check for observations.
+        """Read data from a csv file and check for observations. 
+
+        Time series data are expected to be stored in columns, rather than rows of various lengths.
+        That is, if a sequence of random outcomes is 1,2,3,4,5, the csv should look like:
+        
+        obs
+        1
+        2
+        3
+        4
+        5
+
+        Rather than "1,2,3,4,5". The preferred format is more flexible in many situations, allowing
+        the specification of multiple outcome variables, grouping factors, and timestamps.
+
+        ----------
+
+        - The specification of outcome variables follows this rule: top-level variables and 
+        variable groups are assumed to be i.i.d. Second-level (inside a sublist) variables are 
+        assumed to be multivariate normals. For example:
+
+        obs_vars = ['obs1', 'obs2']
+
+        implies that the emission probability distribution is a joint of two normals, while
+
+        obs_vars = [['obs1', 'obs2']] 
+
+        implies that a two-dimensional normal serves as the emission probability distribution.
+
+        ----------
+
+        - Groups can be specified via the "group" argument. The argument expects the name of the
+        column whose values are labels of groups. The current HMMs only support one grouping
+        factor. Future versions may introduce support for nested groups. 
+
+        For instance, if "group" is specified as the grouping variable, and the data set
+
+        outcome,group
+        1,1
+        2,1
+        3,1
+        3,2
+        4,2
+        5,2
+
+        will be parsed as two observed sequences. Importantly, the first "3" of Group 2 will have
+        a preceeding state known as "boundary marker", instead of "3".
+
+        ----------
+
+        - A timestamp variable can be specified using the "timestamp" argument. This provides
+        the flexibility that allows the input data to be supplied to the sampler in random order,
+        as long as the correct ordering information is in "timestamp". "timestamp" expects the
+        name of the column that provides such ordering information.
+
+        If "timestamp" is left at the default value None, the line order of the CSV is used
+        as the timestamp order.
+        
         """
+
         self.source_filepath = filepath
         self.source_dirname = os.path.dirname(filepath) + '/'
         self.source_filename = os.path.basename(filepath).split('.')[0]
@@ -69,6 +178,34 @@ class HMMSampler(BaseSampler):
             self.d_obs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
                                    hostbuf = np.array(self.obs, dtype=np.float32, order='C'))
 
+    def _infer_trans_p(self):
+        """Infer the transitional probabilities betweenn states without OpenCL.
+        """
+        # copy the current transition prob matrix; this is needed for record_best mode
+        new_trans_p_matrix = np.empty_like(self.trans_p_matrix)
+        new_trans_p_matrix[:] = self.trans_p_matrix[:]
+        
+        # make bigram pairs for easier counting
+        pairs = zip(self.states[:self.N-1], self.states[1:])
+
+        # add also pairs made up by boundary marks 
+        begin_states = self.states[self.boundary_mask == self.SEQ_BEGIN]
+        pairs.extend(zip([0] * begin_states.shape[0], begin_states))
+        end_states = self.states[self.boundary_mask == self.SEQ_END]
+        pairs.extend(zip(end_states, [0] * begin_states.shape[0]))
+
+        pair_count = Counter(pairs)
+        
+        for state_from in np.insert(self.uniq_states, 0, 0):
+            count_from_state = np.sum([_[0] == state_from for _ in pairs])
+            for state_to in np.insert(self.uniq_states, 0, 0):
+                new_trans_p_matrix[state_from, state_to] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + self.num_states + 1)
+
+        new_trans_p_matrix[0, 0] = 0
+        new_trans_p_matrix[0] = new_trans_p_matrix[0] / new_trans_p_matrix[0].sum()
+                
+        return new_trans_p_matrix
+            
 class GaussianHMMSampler(HMMSampler):
 
     def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None, niter = 1000, thining = 0,
@@ -84,25 +221,15 @@ class GaussianHMMSampler(HMMSampler):
             program_str = open(pkg_dir + 'MPBST/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
         
-    def read_csv(self, filepath, obs_vars = ['obs'], group = None, header = True):
-        """Read data from a csv file and check for observations.
-
-        The specification of observation variables follows this rule: top-level variables and 
-        variable groups are assumed to be i.i.d. Second-level (inside a sublist) variables are 
-        assumed to be multivariate normals. For example:
-
-        obs_vars = ['obs1', 'obs2']
-
-        implies that the emission probability distribution is a joint of two normals, while
-
-        obs_vars = [['obs1', 'obs2']] 
-
-        implies that a two-dimensional normal serves as the emission probability distribution.
+    def read_csv(self, filepath, obs_vars = ['obs'], group = None, timestamp = None, header = True):
+        """Read data from a csv file and set up means and covariance matrices for the Gaussian
+        generative model.
         """
         flat_obs_vars = list(np.hstack(obs_vars))
         self.obs_vars = obs_vars; self.flat_obs_vars = flat_obs_vars
 
-        HMMSampler.read_csv(self, filepath, obs_vars = flat_obs_vars, group = group, header = header)
+        HMMSampler.read_csv(self, filepath, obs_vars = flat_obs_vars, group = group,
+                            timestamp = timestamp, header = header)
 
         self.num_var = len(flat_obs_vars)
         self.num_cov_var = np.sum([len(_) ** 2 if type(_) is list else 1 for _ in obs_vars])
@@ -220,34 +347,6 @@ class GaussianHMMSampler(HMMSampler):
         new_means = [new_means[i] for i in reindex]
         new_covs = [new_covs[i] for i in reindex]
         return new_means, new_covs
-
-    def _infer_trans_p(self):
-        """Infer the transitional probabilities betweenn states without OpenCL.
-        """
-        # copy the current transition prob matrix; this is needed for record_best mode
-        new_trans_p_matrix = np.empty_like(self.trans_p_matrix)
-        new_trans_p_matrix[:] = self.trans_p_matrix[:]
-        
-        # make bigram pairs for easier counting
-        pairs = zip(self.states[:self.N-1], self.states[1:])
-
-        # add also pairs made up by boundary marks 
-        begin_states = self.states[self.boundary_mask == self.SEQ_BEGIN]
-        pairs.extend(zip([0] * begin_states.shape[0], begin_states))
-        end_states = self.states[self.boundary_mask == self.SEQ_END]
-        pairs.extend(zip(end_states, [0] * begin_states.shape[0]))
-
-        pair_count = Counter(pairs)
-        
-        for state_from in np.insert(self.uniq_states, 0, 0):
-            count_from_state = np.sum([_[0] == state_from for _ in pairs])
-            for state_to in np.insert(self.uniq_states, 0, 0):
-                new_trans_p_matrix[state_from, state_to] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + self.num_states + 1)
-
-        new_trans_p_matrix[0, 0] = 0
-        new_trans_p_matrix[0] = new_trans_p_matrix[0] / new_trans_p_matrix[0].sum()
-                
-        return new_trans_p_matrix
 
     def _logprob(self, sample):
         """Calculate the log probability of model and data.
