@@ -391,11 +391,11 @@ class GaussianHMMSampler(HMMSampler):
             # then emission probs
             for var_set_idx in xrange(len(self.obs_vars)):
                 var_set = self.obs_vars[var_set_idx]
-                obs_set = np.array(self.obs[var_set])
-                joint_logp += np.array([multivariate_normal.logpdf(obs_set[i],
-                                                                   mean = means[states[i]-1][var_set_idx],
-                                                                   cov = covs[states[i]-1][var_set_idx])
-                                        for i in xrange(self.N)])
+                for state in self.uniq_states:
+                    obs_set = self.obs.loc[np.where(states == state)[0], var_set]
+                    joint_logp[np.where(states == state)] += multivariate_normal.logpdf(obs_set,
+                                                                                        mean = means[state-1][var_set_idx],
+                                                                                        cov = covs[state-1][var_set_idx])
         return joint_logp.sum()
 
     def do_inference(self, output_folder = None):
