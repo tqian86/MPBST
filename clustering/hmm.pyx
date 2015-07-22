@@ -387,7 +387,7 @@ class GaussianHMMSampler(HMMSampler):
         """Calculate the log probability of model and data.
         """
         cdef np.ndarray[np.float_t, ndim = 2] trans_p
-        cdef np.ndarray[np.float_t, ndim = 1] joint_logp
+        cdef np.ndarray[np.float32_t, ndim = 1] joint_logp
         cdef np.ndarray[np.int_t, ndim = 1] states
         cdef list means, covs
         cdef long var_set_idx, i
@@ -400,7 +400,7 @@ class GaussianHMMSampler(HMMSampler):
             var_set_sq_offset = np.hstack(([0], (var_set_dim ** 2).cumsum()[:self.num_var_set - 1]))
 
             gpu_begin_time = time()
-            joint_logp = np.empty(self.N, dtype=np.float32)
+            joint_logp = np.empty(self.N, dtype = np.float32)
             d_means = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = np.hstack(means).flatten().astype(np.float32))
             d_states = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = states.astype(np.int32))
             d_trans_p = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = trans_p.astype(np.float32))
@@ -418,11 +418,12 @@ class GaussianHMMSampler(HMMSampler):
                                         self.d_obs, d_states, d_trans_p, d_means, d_cov_dets, d_cov_invs,
                                         d_var_set_dim, d_var_set_linear_offset, d_var_set_sq_offset, d_joint_logp,
                                         np.int32(self.num_states), np.int32(self.num_var_set), np.int32(self.num_var), np.int32(self.num_cov_var))
+
             cl.enqueue_copy(self.queue, joint_logp, d_joint_logp)
             self.gpu_time += time() - gpu_begin_time
 
         else:
-            joint_logp = np.empty(self.N)
+            joint_logp = np.empty(self.N, dtype=np.float32)
             
             # calculate transition probabilities first
             joint_logp[0] = trans_p[0, states[0]]
