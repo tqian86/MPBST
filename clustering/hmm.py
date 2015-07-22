@@ -351,7 +351,6 @@ class GaussianHMMSampler(HMMSampler):
     def _logprob(self, sample):
         """Calculate the log probability of model and data.
         """
-        obs = np.array(self.obs)
         means, covs, trans_p, states = sample
 
         if self.cl_mode:
@@ -382,6 +381,7 @@ class GaussianHMMSampler(HMMSampler):
             self.gpu_time += time() - gpu_begin_time
 
         else:
+            gpu_time = time()
             joint_logp = np.empty(self.N)
             
             # calculate transition probabilities first
@@ -392,10 +392,12 @@ class GaussianHMMSampler(HMMSampler):
             for var_set_idx in xrange(len(self.obs_vars)):
                 var_set = self.obs_vars[var_set_idx]
                 for state in self.uniq_states:
-                    obs_set = self.obs.loc[np.where(states == state)[0], var_set]
-                    joint_logp[np.where(states == state)] += multivariate_normal.logpdf(obs_set,
-                                                                                        mean = means[state-1][var_set_idx],
-                                                                                        cov = covs[state-1][var_set_idx])
+                    indices = np.where(states == state)
+                    obs_set = np.array(self.obs[var_set])[indices]
+                    joint_logp[indices] += multivariate_normal.logpdf(obs_set,
+                                                                      mean = means[state-1][var_set_idx],
+                                                                      cov = covs[state-1][var_set_idx])
+            self.gpu_time += time() - gpu_time
         return joint_logp.sum()
 
     def do_inference(self, output_folder = None):
