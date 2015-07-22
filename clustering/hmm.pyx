@@ -434,10 +434,11 @@ class GaussianHMMSampler(HMMSampler):
             for var_set_idx in xrange(self.num_var_set):
                 var_set = self.obs_vars[var_set_idx]
                 for state in self.uniq_states:
-                    obs_set = self.obs.loc[np.where(states == state)[0], var_set]
-                    joint_logp[np.where(states == state)] += multivariate_normal.logpdf(obs_set,
-                                                                                        mean = means[state-1][var_set_idx],
-                                                                                        cov = covs[state-1][var_set_idx])
+                    indices = np.where(states == state)
+                    obs_set = np.array(self.obs[var_set])[indices]
+                    joint_logp[indices] += multivariate_normal.logpdf(obs_set,
+                                                                      mean = means[state-1][var_set_idx],
+                                                                      cov = covs[state-1][var_set_idx])
             self.gpu_time += time() - gpu_time
         return joint_logp.sum()
 
