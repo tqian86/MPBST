@@ -390,7 +390,7 @@ class GaussianHMMSampler(HMMSampler):
         cdef np.ndarray[np.float32_t, ndim = 1] joint_logp
         cdef np.ndarray[np.int_t, ndim = 1] states
         cdef list means, covs
-        cdef long var_set_idx, i
+        cdef long var_set_idx, i, state
         
         means, covs, trans_p, states = sample
 
@@ -430,15 +430,15 @@ class GaussianHMMSampler(HMMSampler):
             joint_logp[1:] = np.log(trans_p[states[:self.N-1], states[1:]])
 
             # then emission probs
+            gpu_time = time()
             for var_set_idx in xrange(self.num_var_set):
                 var_set = self.obs_vars[var_set_idx]
-                obs_set = np.array(self.obs[var_set])
-                gpu_time = time()
-                joint_logp += np.array([multivariate_normal.logpdf(obs_set[i],
-                                                                   mean = means[states[i]-1][var_set_idx],
-                                                                   cov = covs[states[i]-1][var_set_idx])
-                                        for i in xrange(self.N)])
-                self.gpu_time += time() - gpu_time
+                for state in self.uniq_states:
+                    obs_set = self.obs.loc[np.where(states == state)[0], var_set]
+                    joint_logp[np.where(states == state)] += multivariate_normal.logpdf(obs_set,
+                                                                                        mean = means[state-1][var_set_idx],
+                                                                                        cov = covs[state-1][var_set_idx])
+            self.gpu_time += time() - gpu_time
         return joint_logp.sum()
 
     def do_inference(self, str output_folder = None):
