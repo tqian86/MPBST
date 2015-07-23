@@ -5,7 +5,7 @@ from MPBST.clustering.hmm import *
 
 
 if __name__ == '__main__':
-    hs = GaussianHMMSampler(num_states = 10, niter = 200, record_best = False, cl_mode=False, debug_mumble = True)
+    hs = GaussianHMMSampler(num_states = 10, sample_size = 200, record_best = False, cl_mode=False, debug_mumble = True)
     hs.read_csv('../toydata/speed.csv.gz', obs_vars = ['rt'], group = 'corr')
     gt, tt = hs.do_inference()
     print(gt, tt)

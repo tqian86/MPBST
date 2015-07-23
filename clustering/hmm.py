@@ -54,26 +54,51 @@ Planned models:
 
 from __future__ import print_function, division
 
-import sys, os.path
-pkg_dir = os.path.dirname(os.path.realpath(__file__)) + '/../../'
-sys.path.append(pkg_dir)
+import sys, os.path, gzip
 
-from MPBST.base.sampler import *
-
+import MPBST
+from MPBST import *
 import itertools
 import numpy as np
 from scipy.stats import multivariate_normal
 from collections import Counter
+from time import time
+
+def multivariate_t(mu, Sigma, df, size=None):
+    '''
+    Output:
+    Produce size samples of d-dimensional multivariate t distribution
+    Input:
+    mu = mean (d dimensional numpy array or scalar)
+    Sigma = scale matrix (dxd numpy array)
+    df = degrees of freedom
+    size = # of samples to produce
+    '''
+    d = len(Sigma)
+    Z = np.random.multivariate_normal(np.zeros(d), Sigma, size)
+    g = np.repeat(np.random.gamma(df/2, 2/df, size), d).reshape(Z.shape)
+    return mu + Z/np.sqrt(g)
+
+
+def wishart(df, Sigma, size=None):
+
+    dim = len(Sigma)
+    Z = np.random.multivariate_normal(np.zeros(dim), Sigma, df)
+    return Z.T.dot(Z)
 
 class HMMSampler(BaseSampler):
 
     def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None,
-                 niter = 1000, thining = 0,
-                 annealing = False, debug_mumble = False):
+                 sample_size = 1000, annealing = False, debug_mumble = False):
         """Initialize the base HMM sampler.
         """
-        BaseSampler.__init__(self, record_best, cl_mode, cl_device, niter, thining,
-                             annealing = annealing, debug_mumble = debug_mumble)
+        BaseSampler.__init__(self,
+                             record_best = record_best,
+                             cl_mode = cl_mode,
+                             cl_device = cl_device,
+                             sample_size = sample_size, 
+                             annealing = annealing,
+                             debug_mumble = debug_mumble)
 
         self.data = None
         self.num_states = num_states
@@ -143,30 +168,27 @@ class HMMSampler(BaseSampler):
         as the timestamp order.
         
         """
-
-        self.source_filepath = filepath
-        self.source_dirname = os.path.dirname(filepath) + '/'
-        self.source_filename = os.path.basename(filepath).split('.')[0]
-        
-        self.data = pd.read_csv(filepath, compression = 'gzip')
-        self.N = self.data.shape[0]
+        BaseSampler.read_csv(self,
+                             filepath = filepath,
+                             obs_vars = obs_vars,
+                             header = header)
 
         # create timestamp using row number if no timestamp is supplied
         if timestamp is None:
             timestamp = '_time_stamp_'
-            self.data['_time_stamp_'] = range(self.data.shape[0])
+            self.original_data['_time_stamp_'] = range(self.N)
 
         if group is None:
-            self.data.sort(columns = timestamp, inplace=True)
-            self.obs = self.data[obs_vars]
+            self.original_data.sort(columns = timestamp, inplace=True)
+            self.data = self.original_data[obs_vars]
             self.boundary_mask = np.zeros(self.N, dtype=np.int32)
             self.boundary_mask[0] = self.SEQ_BEGIN
             self.boundary_mask[-1] = self.SEQ_END
         else:
-            self.data.sort(columns = [group, timestamp], inplace=True)
-            self.obs = self.data[obs_vars]
+            self.original_data.sort(columns = [group, timestamp], inplace=True)
+            self.data = self.original_data[obs_vars]
             self.boundary_mask = np.zeros(self.N, dtype=np.int32)
-            rle_values, rle_lengths = zip(*[(k, len(list(g))) for k, g in itertools.groupby(self.data[group])])
+            rle_values, rle_lengths = zip(*[(k, len(list(g))) for k, g in itertools.groupby(self.original_data[group])])
             boundary_begins = np.array(rle_lengths).cumsum() - rle_lengths
             boundary_ends = np.array(rle_lengths).cumsum() - 1
             self.boundary_mask[boundary_begins] = self.SEQ_BEGIN
@@ -176,7 +198,7 @@ class HMMSampler(BaseSampler):
 
         if self.cl_mode:
             self.d_obs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
-                                   hostbuf = np.array(self.obs, dtype=np.float32, order='C'))
+                                   hostbuf = np.array(self.data, dtype=np.float32, order='C'))
 
     def _infer_trans_p(self):
         """Infer the transitional probabilities betweenn states without OpenCL.
@@ -208,17 +230,22 @@ class HMMSampler(BaseSampler):
             
 class GaussianHMMSampler(HMMSampler):
 
-    def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None, niter = 1000, thining = 0,
-                 annealing = False, debug_mumble = False):
+    def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None,
+                 sample_size = 1000, annealing = False, debug_mumble = False):
         """Initialize the base HMM sampler.
         """
-        HMMSampler.__init__(self, num_states, record_best, cl_mode, cl_device, niter, thining, annealing, debug_mumble)
+        HMMSampler.__init__(self, num_states = num_states,
+                            record_best = record_best,
+                            cl_mode = cl_mode, cl_device = cl_device,
+                            sample_size = sample_size,
+                            annealing = annealing,
+                            debug_mumble = debug_mumble)
 
         if cl_mode:
             global cl
             import pyopencl as cl
             import pyopencl.array
-            program_str = open(pkg_dir + 'MPBST/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
+            program_str = open(MPBST.__path__ + '/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
         
     def read_csv(self, filepath, obs_vars = ['obs'], group = None, timestamp = None, header = True):
@@ -264,7 +291,7 @@ class GaussianHMMSampler(HMMSampler):
         # emission probabilities can be calculated in one pass
         for var_set_idx in xrange(len(self.obs_vars)):
             var_set = self.obs_vars[var_set_idx]
-            obs_set = np.array(self.obs[var_set])
+            obs_set = np.array(self.data[var_set])
             for state in self.uniq_states:
                 if var_set_idx == 0: emit_logp[:, state-1] = 0
                 emit_logp[:,state-1] += multivariate_normal.logpdf(obs_set,
@@ -305,7 +332,7 @@ class GaussianHMMSampler(HMMSampler):
             var_set = self.obs_vars[var_set_idx]
             if type(var_set) is str: obs_dim = 1
             else: obs_dim = len(var_set)
-            obs = np.array(self.obs[var_set])
+            obs = np.array(self.data[var_set])
 
             for state in self.uniq_states:
                 
@@ -393,7 +420,7 @@ class GaussianHMMSampler(HMMSampler):
                 var_set = self.obs_vars[var_set_idx]
                 for state in self.uniq_states:
                     indices = np.where(states == state)
-                    obs_set = np.array(self.obs[var_set])[indices]
+                    obs_set = np.array(self.data[var_set])[indices]
                     joint_logp[indices] += multivariate_normal.logpdf(obs_set,
                                                                       mean = means[state-1][var_set_idx],
                                                                       cov = covs[state-1][var_set_idx])
@@ -422,7 +449,7 @@ class GaussianHMMSampler(HMMSampler):
         
         # start sampling
         begin_time = time()
-        for i in xrange(1, self.niter+1):
+        for i in xrange(1, self.sample_size+1):
             self.set_temperature(iteration = i)
             if self.cl_mode:
                 new_states = self._infer_states()
@@ -465,7 +492,7 @@ class GaussianHMMSampler(HMMSampler):
         return
 
 if __name__ == '__main__':
-    hs = GaussianHMMSampler(num_states = 2, niter = 2000, record_best = False, cl_mode=True, debug_mumble = True)
+    hs = GaussianHMMSampler(num_states = 2, sample_size = 2000, record_best = False, cl_mode=True, debug_mumble = True)
     hs.read_csv('./toydata/speed.csv.gz', obs_vars = ['rt'], group='corr')
     gt, tt = hs.do_inference()
     print(gt, tt)
