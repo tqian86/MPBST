@@ -86,8 +86,11 @@ class HMMSampler(BaseSampler):
         trans_p_matrix = np.random.random((num_states+1, num_states+1))
         trans_p_matrix = trans_p_matrix / trans_p_matrix.sum(axis=1)
         self.trans_p_matrix = trans_p_matrix
+
+        cdef int SEQ_BEGIN, SEQ_END
+        SEQ_BEGIN, SEQ_END = 1, 2
+        self.SEQ_BEGIN, self.SEQ_END = SEQ_BEGIN, SEQ_END
         
-        self.SEQ_BEGIN, self.SEQ_END = 1, 2
         self.str_output_lines = []
         
     def read_csv(self, filepath, obs_vars = ['obs'], group = None, timestamp = None, header = True):
