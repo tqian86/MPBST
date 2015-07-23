@@ -56,13 +56,10 @@ from __future__ import print_function, division
 
 import sys, os.path
 import cython
-#pkg_dir = os.path.dirname(os.path.realpath(__file__)) + '/../../'
-cdef str pkg_dir = '/Users/qiant/Projects/'
-sys.path.append(pkg_dir)
 
 from MPBST.base.sampler import *
 
-import itertools
+import itertools, imp
 import numpy as np; cimport numpy as np
 from scipy.stats import multivariate_normal
 from collections import Counter
@@ -74,6 +71,8 @@ class HMMSampler(BaseSampler):
                  annealing = False, debug_mumble = False):
         """Initialize the base HMM sampler.
         """
+        _, self.pkg_dir, _ = imp.find_module('MPBST')
+
         BaseSampler.__init__(self, record_best, cl_mode, cl_device, niter, thining,
                              annealing = annealing, debug_mumble = debug_mumble)
 
@@ -237,7 +236,7 @@ class GaussianHMMSampler(HMMSampler):
             global cl
             import pyopencl as cl
             import pyopencl.array
-            program_str = open(pkg_dir + 'MPBST/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
+            program_str = open(self.pkg_dir + '/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
         
     def read_csv(self, str filepath, list obs_vars = ['obs'], str group = None, str timestamp = None, header = True):
