@@ -229,9 +229,11 @@ class HMMSampler(BaseSampler):
 
         # add also pairs made up by boundary marks 
         cdef np.ndarray[np.int_t, ndim = 1] begin_states, end_states
-        begin_states = self.states[self.boundary_mask == self.SEQ_BEGIN]
+        cdef long SEQ_BEGIN = self.SEQ_BEGIN, SEQ_END = self.SEQ_END
+        
+        begin_states = self.states[self.boundary_mask == SEQ_BEGIN]
         pairs.extend(zip([0] * begin_states.shape[0], begin_states))
-        end_states = self.states[self.boundary_mask == self.SEQ_END]
+        end_states = self.states[self.boundary_mask == SEQ_END]
         pairs.extend(zip(end_states, [0] * begin_states.shape[0]))
 
         pair_count = Counter(pairs)
@@ -314,12 +316,14 @@ class GaussianHMMSampler(HMMSampler):
         state_logp = np.empty((self.N, self.num_states))
         emit_logp = np.empty((self.N, self.num_states))
 
-        cdef long var_set_idx, state_idx, state
+        cdef long var_set_idx, state_idx, state, nth
+        cdef long num_var_set = self.num_var_set, num_states = self.num_states
+        
         # emission probabilities can be calculated in one pass
-        for var_set_idx in xrange(self.num_var_set):
+        for var_set_idx in xrange(num_var_set):
             var_set = self.obs_vars[var_set_idx]
             obs_set = np.array(self.data[var_set])
-            for state_idx in xrange(self.num_states):
+            for state_idx in xrange(num_states):
                 state = self.uniq_states[state_idx]
                 if var_set_idx == 0: emit_logp[:, state-1] = 0
                 emit_logp[:,state-1] += multivariate_normal.logpdf(obs_set,
@@ -328,8 +332,9 @@ class GaussianHMMSampler(HMMSampler):
        
         # state probabilities need to be interated over
         cdef np.ndarray[np.float_t, ndim=2] trans_logp = np.log(self.trans_p_matrix)
-        cdef size_t is_beginning, is_end, nth
+        cdef size_t is_beginning, is_end
         cdef np.ndarray[np.float_t, ndim=1] trans_prev_logp, trans_next_logp
+        
         for nth in xrange(self.N):
             is_beginning = self.boundary_mask[nth] == self.SEQ_BEGIN
             is_end = self.boundary_mask[nth] == self.SEQ_END
