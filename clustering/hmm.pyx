@@ -1,4 +1,3 @@
-# cython: profile=True
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """Gibbs samplers of Hidden Markov Models with OpenCL support.
@@ -65,7 +64,7 @@ from scipy.stats import multivariate_normal
 from collections import Counter
 from time import time
 from libc.math cimport exp, log, pow
-from libc.stdlib cimport rand
+from libc.stdlib cimport rand, RAND_MAX
 
 def multivariate_t(np.ndarray mu, np.ndarray Sigma, int df, size=None):
     '''
@@ -105,7 +104,7 @@ cdef object sample(a, np.ndarray[np.float_t, ndim = 1] p):
     for i in xrange(p_length):
         p[i] = p[i] /  p_sum
         
-    cdef double r = rand() #random.random()
+    cdef double r = rand() / RAND_MAX #random.random()
     cdef double total = 0           # range: [0,1]
     for i in xrange(p_length):
         total += p[i]
