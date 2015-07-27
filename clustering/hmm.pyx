@@ -513,7 +513,7 @@ class GaussianHMMSampler(HMMSampler):
             joint_logp = np.empty(self.N, dtype=np.float32)
             
             # calculate transition probabilities first
-            joint_logp[0] = trans_p[0, states[0]]
+            joint_logp[0] = np.log(trans_p[0, states[0]])
             joint_logp[1:] = np.log(trans_p[states[:self.N-1], states[1:]])
 
             # then emission probs
