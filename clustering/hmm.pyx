@@ -587,7 +587,7 @@ class GaussianHMMSampler(HMMSampler):
         cdef np.ndarray[np.float_t, ndim=2] cov
         cdef int num_states = self.num_states
         cdef int state, state_idx
-        cdef double loglik = self.loglik, result
+        cdef double loglik = self.loglik
         cdef int num_var = self.num_var
         cdef list row, covs = self.covs, means = self.means
         for state_idx in xrange(num_states):
@@ -599,6 +599,6 @@ class GaussianHMMSampler(HMMSampler):
             row += list(np.ravel(trans_p_matrix[state, 1:]))
             row += list((self.states == state).astype(np.bool).astype(np.int0))
 
-            self.sample_fp.write(','.join([str(result) for result in row]) + '\n')
+            self.sample_fp.write(','.join([str(_) for _ in row]) + '\n')
                 
         return
