@@ -473,7 +473,7 @@ class GaussianHMMSampler(HMMSampler):
         """Calculate the log probability of model and data.
         """
         cdef np.ndarray[np.float_t, ndim = 2] trans_p
-        cdef np.ndarray[np.float32_t, ndim = 1] joint_logp
+        cdef np.ndarray joint_logp
         cdef np.ndarray[np.int_t, ndim = 1] states
         cdef list means, covs
         cdef long var_set_idx, i, state
@@ -487,14 +487,15 @@ class GaussianHMMSampler(HMMSampler):
             var_set_sq_offset = np.hstack(([0], (var_set_dim ** 2).cumsum()[:self.num_var_set - 1]))
 
             gpu_begin_time = time()
-            joint_logp = np.empty(self.N, dtype = np.float32)
-            d_means = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = np.hstack(means).flatten().astype(np.float32))
+            joint_logp = np.empty((self.N, self.num_var_set), dtype=np.float32)
+            d_means = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+                                hostbuf = np.hstack([np.hstack(_) for _ in means]).astype(np.float32))
             d_states = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = states.astype(np.int32))
             d_trans_p = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = trans_p.astype(np.float32))
             d_cov_dets = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
-                                   hostbuf = np.array([np.linalg.det(cov) for cov in covs], dtype=np.float32))
+                                   hostbuf = np.hstack([[np.linalg.det(_) for _ in cov] for cov in covs]).astype(np.float32))
             d_cov_invs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
-                                   hostbuf = np.hstack([np.linalg.inv(cov).flatten() for cov in covs]).astype(np.float32))
+                                   hostbuf = np.hstack([np.hstack([np.linalg.inv(_).ravel() for _ in cov]) for cov in covs]).astype(np.float32))
             d_var_set_dim = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = var_set_dim.astype(np.float32))
             d_var_set_linear_offset = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = var_set_linear_offset.astype(np.float32))
             d_var_set_sq_offset = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = var_set_sq_offset.astype(np.float32))
@@ -504,7 +505,7 @@ class GaussianHMMSampler(HMMSampler):
             self.cl_prg.calc_joint_logp(self.queue, (self.N, self.num_var_set), None,
                                         self.d_obs, d_states, d_trans_p, d_means, d_cov_dets, d_cov_invs,
                                         d_var_set_dim, d_var_set_linear_offset, d_var_set_sq_offset, d_joint_logp,
-                                        np.int32(self.num_states), np.int32(self.num_var_set), np.int32(self.num_var), np.int32(self.num_cov_var))
+                                        np.int32(self.num_states), np.int32(self.num_var), np.int32(self.num_cov_var))
 
             cl.enqueue_copy(self.queue, joint_logp, d_joint_logp)
             self.gpu_time += time() - gpu_begin_time
