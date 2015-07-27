@@ -245,7 +245,7 @@ class GaussianHMMSampler(HMMSampler):
             global cl
             import pyopencl as cl
             import pyopencl.array
-            program_str = open(MPBST.__path__ + '/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
+            program_str = open(MPBST.__path__[0] + '/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
         
     def read_csv(self, filepath, obs_vars = ['obs'], group = None, timestamp = None, header = True):
@@ -276,7 +276,7 @@ class GaussianHMMSampler(HMMSampler):
         return np.eye(dim)
 
     def _wishart_v0(self, dim):
-        return 1
+        return dim
         
     def _infer_states(self):
         """Infer the state of each observation without OpenCL.
