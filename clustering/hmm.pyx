@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# cython: profile=True
 """Gibbs samplers of Hidden Markov Models with OpenCL support.
 
 This module implements Gibbs samplers of Hidden Markov Models (HMMs). An HMM is used to model the 
@@ -355,18 +356,22 @@ class GaussianHMMSampler(HMMSampler):
         """Infer the state of each observation without OpenCL.
         """
         cdef int num_states = self.num_states
+        cdef int nth_boundary_mask
+        cdef int SEQ_BEGIN = self.SEQ_BEGIN, SEQ_END = self.SEQ_END, N = self.N
         
         # copy the states first, this is needed for record_best mode
         cdef np.ndarray[np.int_t, ndim=1] new_states = np.empty(self.states.shape, dtype=np.int);
         new_states[:] = self.states[:]
         
         # set up grid for storing log probabilities
-        cdef np.ndarray[np.float_t, ndim=2] emit_logp = np.empty((self.N, num_states))
+        cdef np.ndarray[np.float_t, ndim=2] emit_logp = np.empty((N, num_states))
 
         cdef long var_set_idx, state_idx, state, nth
         cdef long num_var_set = self.num_var_set
         cdef np.ndarray[np.int_t, ndim=1] uniq_states = self.uniq_states
-        
+        cdef np.ndarray[np.int_t, ndim=1] boundary_mask = self.boundary_mask
+
+        gpu_time = time()
         # emission probabilities can be calculated in one pass
         for var_set_idx in xrange(num_var_set):
             var_set = self.obs_vars[var_set_idx]
@@ -379,32 +384,29 @@ class GaussianHMMSampler(HMMSampler):
                                                                    cov = self.covs[state-1][var_set_idx])
        
         # state probabilities need to be interated over
-        cdef np.ndarray[np.float_t, ndim=2] trans_logp = np.log(self.trans_p_matrix)
-        cdef np.ndarray[np.float_t, ndim=1] trans_prev_logp, trans_next_logp, state_logp
+        cdef np.ndarray[np.float_t, ndim=1] state_logp = np.empty(num_states)
+        cdef np.ndarray[np.float_t, ndim=2] trans_p_matrix = self.trans_p_matrix
         cdef long is_beginning, is_end
 
-        for nth in xrange(self.N):
-            is_beginning = self.boundary_mask[nth] == self.SEQ_BEGIN
-            is_end = self.boundary_mask[nth] == self.SEQ_END
-            
-            if is_beginning:
-                trans_prev_logp = trans_logp[0, 1:]
-            else:
-                trans_prev_logp = trans_logp[new_states[nth - 1], 1:]
+        for nth in xrange(N):
+            nth_boundary_mask = boundary_mask[nth]
 
-            if is_end:
-                trans_next_logp = trans_logp[1:, 0]
-            else:
-                trans_next_logp = trans_logp[1:, new_states[nth + 1]]
+            for state_idx in xrange(num_states):
+                state = uniq_states[state_idx]
+                if nth_boundary_mask == SEQ_BEGIN:
+                    state_logp[state_idx] = log(trans_p_matrix[0, state])
+                else:
+                    state_logp[state_idx] = log(trans_p_matrix[new_states[nth - 1], state])
 
-            state_logp = trans_prev_logp + trans_next_logp
+                if nth_boundary_mask == SEQ_END:
+                    state_logp[state_idx] += log(trans_p_matrix[state, 0])
+                else:
+                    state_logp[state_idx] += log(trans_p_matrix[state, new_states[nth + 1]])
 
-            gpu_time = time()
             # resample state
             new_states[nth] = sample(a = uniq_states,
                                      p = lognormalize(x = state_logp + emit_logp[nth], temp = self.annealing_temp))
-            self.gpu_time += time() - gpu_time
-
+        self.gpu_time += time() - gpu_time
         return new_states
 
     @cython.boundscheck(False)
@@ -563,7 +565,7 @@ class GaussianHMMSampler(HMMSampler):
 
             if self.record_best:
                 if self.auto_save_sample((new_means, new_covs, new_trans_p, new_states)):
-                    print('Means: ', self.means, file=sys.stderr)
+                    #print('Means: ', self.means, file=sys.stderr)
                     self.loglik = self.best_sample[1]
                     self._save_sample(iteration = i)
                 if self.no_improvement(): break
@@ -577,20 +579,27 @@ class GaussianHMMSampler(HMMSampler):
         
         return self.gpu_time, self.total_time
 
-    
+    @cython.boundscheck(False)
     def _save_sample(self, long iteration):
         """Save the means and covariance matrices from the current iteration.
         """
-        cdef long state, state_idx
-        cdef list row
-        for state_idx in xrange(self.num_states):
-            state = self.uniq_states[state_idx]
-            row = [iteration, self.loglik, self.num_var, state]
-            row += list(np.hstack(self.means[state-1]))
-            row += list(np.hstack([np.ravel(_) for _ in self.covs[state-1]]))
-            row += [self.trans_p_matrix[0, state], self.trans_p_matrix[state, 0]]
-            row += list(np.ravel(self.trans_p_matrix[state, 1:]))
+        cdef np.ndarray[np.int_t, ndim=1] uniq_states = self.uniq_states
+        cdef np.ndarray[np.float_t, ndim=2] trans_p_matrix = self.trans_p_matrix
+        cdef np.ndarray[np.float_t, ndim=2] cov
+        cdef int num_states = self.num_states
+        cdef int state, state_idx
+        cdef double loglik = self.loglik, result
+        cdef int num_var = self.num_var
+        cdef list row, covs = self.covs, means = self.means
+        for state_idx in xrange(num_states):
+            state = uniq_states[state_idx]
+            row = [iteration, loglik, num_var, state]
+            row += list(np.hstack(means[state-1]))
+            row += list(np.hstack([np.ravel(cov) for cov in covs[state-1]]))
+            row += [trans_p_matrix[0, state], trans_p_matrix[state, 0]]
+            row += list(np.ravel(trans_p_matrix[state, 1:]))
             row += list((self.states == state).astype(np.bool).astype(np.int0))
-            print(','.join([str(_) for _ in row]), file = self.sample_fp)
+
+            self.sample_fp.write(','.join([str(result) for result in row]) + '\n')
                 
         return
