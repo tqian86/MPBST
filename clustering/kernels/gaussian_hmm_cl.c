@@ -194,7 +194,7 @@ kernel void calc_joint_logp(global float *obs,
 			    global float *var_set_linear_offset,
 			    global float *var_set_sq_offset,
 			    global float *joint_logp,
-			    uint num_state, uint num_var_set, uint num_var, uint num_cov_var) {
+			    uint num_state, uint num_var, uint num_cov_var) {
   
   uint obs_idx = get_global_id(0); // get the index of the observation of interest
   uint state_idx = states[obs_idx] - 1;
@@ -203,6 +203,8 @@ kernel void calc_joint_logp(global float *obs,
   uint vs_dim = var_set_dim[vs_idx]; // dimension of the variable set
   uint vs_offset = var_set_linear_offset[vs_idx];
   uint vs_sq_offset = var_set_sq_offset[vs_idx];
+
+  uint num_var_set = get_global_size(1);
   
   float logp = 0;
   logp += vs_dim * log(2 * M_PI_F) + log(cov_dets[state_idx * num_var_set + vs_idx]);
@@ -220,8 +222,8 @@ kernel void calc_joint_logp(global float *obs,
   }
   logp = -0.5f * (logp + mat_mul);
 
-  // calculate transitional probabilities
+  // calculate transitional probabilities      
   uint prev_state = (obs_idx > 0) * states[(obs_idx - 1) * (obs_idx > 0)]; // this will be 0 for the first observation
-  logp = logp + log(trans_p[prev_state * (num_state + 1) + (state_idx + 1)]);
-  joint_logp[obs_idx] = logp;
+  logp += (vs_idx == 0) * log(trans_p[prev_state * (num_state + 1) + (state_idx + 1)]);
+  joint_logp[obs_idx * num_var_set + vs_idx] = logp;
 }
