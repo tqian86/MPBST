@@ -324,7 +324,7 @@ class GaussianHMMSampler(HMMSampler):
             global cl
             import pyopencl as cl
             import pyopencl.array
-            program_str = open(MPBST.__path__ + '/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
+            program_str = open(MPBST.__path__[0] + '/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
         
     def read_csv(self, str filepath, list obs_vars = ['obs'], str group = None, str timestamp = None, header = True):
