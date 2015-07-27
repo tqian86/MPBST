@@ -548,7 +548,7 @@ class GaussianHMMSampler(HMMSampler):
         header += ['trans_p_from_bd', 'trans_p_to_bd']
         header += ['trans_p_to_{0:d}'.format(_) for _ in self.uniq_states]
         header += ['has_obs_{0:d}'.format(_) for _ in range(1, self.N + 1)]
-        print(','.join(header), file = self.sample_fp)
+        self.sample_fp.write(','.join(header) + '\n')
         
         # start sampling
         begin_time = time()
@@ -565,7 +565,6 @@ class GaussianHMMSampler(HMMSampler):
 
             if self.record_best:
                 if self.auto_save_sample((new_means, new_covs, new_trans_p, new_states)):
-                    #print('Means: ', self.means, file=sys.stderr)
                     self.loglik = self.best_sample[1]
                     self._save_sample(iteration = i)
                 if self.no_improvement(): break
