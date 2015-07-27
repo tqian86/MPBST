@@ -305,7 +305,7 @@ cdef np.ndarray[np.int_t, ndim=2] _wishart_T0(int dim):
     return np.eye(dim)
 
 cdef int _wishart_v0(int dim):
-    return 1
+    return dim
 
 class GaussianHMMSampler(HMMSampler):
 

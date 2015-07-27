@@ -276,7 +276,7 @@ class GaussianHMMSampler(HMMSampler):
         return np.eye(dim)
 
     def _wishart_v0(self, dim):
-        return 1
+        return dim
         
     def _infer_states(self):
         """Infer the state of each observation without OpenCL.
