@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # cython: profile=True
 """Gibbs samplers of Hidden Markov Models with OpenCL support.
@@ -65,7 +64,6 @@ from scipy.stats import multivariate_normal
 from collections import Counter
 from time import time
 from libc.math cimport exp, log, pow
-from libc.stdlib cimport rand, RAND_MAX
 
 def multivariate_t(np.ndarray mu, np.ndarray Sigma, int df, size=None):
     '''
@@ -82,56 +80,11 @@ def multivariate_t(np.ndarray mu, np.ndarray Sigma, int df, size=None):
     g = np.repeat(np.random.gamma(df/2, 2/df, size), d).reshape(Z.shape)
     return mu + Z/np.sqrt(g)
 
-
 def wishart(int df, np.ndarray Sigma, size=None):
 
     cdef int dim = len(Sigma)
     Z = np.random.multivariate_normal(np.zeros(dim), Sigma, df)
     return Z.T.dot(Z)
-
-@cython.boundscheck(False)
-cdef object sample(a, np.ndarray[np.float_t, ndim = 1] p):
-    """Step sample from a discrete distribution using CDF
-    """
-    if (len(a) != len(p)):
-        raise Exception('a != p')
-
-    cdef double p_sum = 0
-    cdef int i, p_length = len(p)
-
-    for i in xrange(p_length):
-        p_sum += p[i]
-
-    for i in xrange(p_length):
-        p[i] = p[i] /  p_sum
-        
-    cdef double r = rand() / RAND_MAX #random.random()
-    cdef double total = 0           # range: [0,1]
-    for i in xrange(p_length):
-        total += p[i]
-        if total > r:
-            return a[i]
-    return a[p_length - 1]
-
-@cython.boundscheck(False)
-cdef np.ndarray[np.float_t, ndim=1] lognormalize(np.ndarray[np.float_t, ndim=1] x, double temp = 1):
-    """Normalize a vector of logprobabilities to probabilities that sum up to 1.
-    Optionally accepts an annealing temperature that does simple annealing.
-    """
-    cdef int i, x_length = x.shape[0]
-    cdef double x_max, x_sum = 0
-    for i in xrange(x_length):
-        if i == 0: x_max = x[i]
-        elif x[i] > x_max: x_max = x[i]
-
-    for i in xrange(x_length):
-        x[i] = pow(exp(x[i] - x_max), temp)
-        x_sum += x[i]
-
-    for i in xrange(x_length):
-        x[i] /= x_sum
-
-    return x
 
 class HMMSampler(BaseSampler):
 
