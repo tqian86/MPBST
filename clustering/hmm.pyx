@@ -88,12 +88,13 @@ def wishart(int df, np.ndarray Sigma, size=None):
 
 class HMMSampler(BaseSampler):
 
-    def __init__(self, int num_states, record_best = True, cl_mode = False, cl_device = None,
+    def __init__(self, int num_states, search = True, int search_tolerance = 100, cl_mode = False, cl_device = None,
                  int sample_size = 1000, annealing = False, debug_mumble = False):
         """Initialize the base HMM sampler.
         """
         BaseSampler.__init__(self,
-                             record_best = record_best,
+                             search = search,
+                             search_tolerance = search_tolerance,
                              cl_mode = cl_mode,
                              cl_device = cl_device,
                              sample_size = sample_size, 
@@ -220,7 +221,7 @@ class HMMSampler(BaseSampler):
     def _infer_trans_p(self):
         """Infer the transitional probabilities betweenn states without OpenCL.
         """
-        # copy the current transition prob matrix; this is needed for record_best mode
+        # copy the current transition prob matrix; this is needed for search mode
         cdef np.ndarray[np.float_t, ndim = 2] new_trans_p_matrix = np.empty_like(self.trans_p_matrix)
         new_trans_p_matrix[:] = self.trans_p_matrix[:]
         
@@ -263,12 +264,13 @@ cdef int _wishart_v0(int dim):
 
 class GaussianHMMSampler(HMMSampler):
 
-    def __init__(self, int num_states, record_best = True, cl_mode = False, cl_device = None,
+    def __init__(self, int num_states, search = True, int search_tolerance = 100,
+                 cl_mode = False, cl_device = None,
 	         int sample_size = 1000, annealing = False, debug_mumble = False):
         """Initialize the base HMM sampler.
         """
         HMMSampler.__init__(self, num_states = num_states,
-                            record_best = record_best,
+                            search = search, search_tolerance = search_tolerance,
                             cl_mode = cl_mode, cl_device = cl_device,
                             sample_size = sample_size,
                             annealing = annealing,
@@ -312,7 +314,7 @@ class GaussianHMMSampler(HMMSampler):
         cdef int nth_boundary_mask
         cdef int SEQ_BEGIN = self.SEQ_BEGIN, SEQ_END = self.SEQ_END, N = self.N
         
-        # copy the states first, this is needed for record_best mode
+        # copy the states first, this is needed for search mode
         cdef np.ndarray[np.int_t, ndim=1] new_states = np.empty(self.states.shape, dtype=np.int);
         new_states[:] = self.states[:]
         
@@ -324,7 +326,6 @@ class GaussianHMMSampler(HMMSampler):
         cdef np.ndarray[np.int_t, ndim=1] uniq_states = self.uniq_states
         cdef np.ndarray[np.int_t, ndim=1] boundary_mask = self.boundary_mask
 
-        gpu_time = time()
         # emission probabilities can be calculated in one pass
         for var_set_idx in xrange(num_var_set):
             var_set = self.obs_vars[var_set_idx]
@@ -359,7 +360,7 @@ class GaussianHMMSampler(HMMSampler):
             # resample state
             new_states[nth] = sample(a = uniq_states,
                                      p = lognormalize(x = state_logp + emit_logp[nth], temp = self.annealing_temp))
-        self.gpu_time += time() - gpu_time
+
         return new_states
 
     @cython.boundscheck(False)
@@ -517,7 +518,7 @@ class GaussianHMMSampler(HMMSampler):
                 new_means, new_covs = self._infer_means_covs()
                 new_trans_p = self._infer_trans_p()
 
-            if self.record_best:
+            if self.search:
                 if self.auto_save_sample((new_means, new_covs, new_trans_p, new_states)):
                     self.loglik = self.best_sample[1]
                     self._save_sample(iteration = i)
