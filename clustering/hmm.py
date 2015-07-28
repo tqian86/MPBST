@@ -88,12 +88,13 @@ def wishart(df, Sigma, size=None):
 
 class HMMSampler(BaseSampler):
 
-    def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None,
-                 sample_size = 1000, annealing = False, debug_mumble = False):
+    def __init__(self, num_states, search = True, cl_mode = False, cl_device = None,
+                 sample_size = 1000, search_tolerance = 100, annealing = False, debug_mumble = False):
         """Initialize the base HMM sampler.
         """
         BaseSampler.__init__(self,
-                             record_best = record_best,
+                             search = search,
+                             search_tolerance = search_tolerance,
                              cl_mode = cl_mode,
                              cl_device = cl_device,
                              sample_size = sample_size, 
@@ -203,7 +204,7 @@ class HMMSampler(BaseSampler):
     def _infer_trans_p(self):
         """Infer the transitional probabilities betweenn states without OpenCL.
         """
-        # copy the current transition prob matrix; this is needed for record_best mode
+        # copy the current transition prob matrix; this is needed for search mode
         new_trans_p_matrix = np.empty_like(self.trans_p_matrix)
         new_trans_p_matrix[:] = self.trans_p_matrix[:]
         
@@ -230,12 +231,13 @@ class HMMSampler(BaseSampler):
             
 class GaussianHMMSampler(HMMSampler):
 
-    def __init__(self, num_states, record_best = True, cl_mode = False, cl_device = None,
-                 sample_size = 1000, annealing = False, debug_mumble = False):
+    def __init__(self, num_states, search = True, cl_mode = False, cl_device = None,
+                 sample_size = 1000, search_tolerance = 100, annealing = False, debug_mumble = False):
         """Initialize the base HMM sampler.
         """
         HMMSampler.__init__(self, num_states = num_states,
-                            record_best = record_best,
+                            search = search,
+                            search_tolerance = search_tolerance,
                             cl_mode = cl_mode, cl_device = cl_device,
                             sample_size = sample_size,
                             annealing = annealing,
@@ -281,7 +283,7 @@ class GaussianHMMSampler(HMMSampler):
     def _infer_states(self):
         """Infer the state of each observation without OpenCL.
         """
-        # copy the states first, this is needed for record_best mode
+        # copy the states first, this is needed for search mode
         new_states = np.empty_like(self.states); new_states[:] = self.states[:]
         
         # set up grid for storing log probabilities
@@ -460,7 +462,7 @@ class GaussianHMMSampler(HMMSampler):
                 new_means, new_covs = self._infer_means_covs()
                 new_trans_p = self._infer_trans_p()
 
-            if self.record_best:
+            if self.search:
                 if self.auto_save_sample((new_means, new_covs, new_trans_p, new_states)):
                     self.loglik = self.best_sample[1]
                     self._save_sample(iteration = i)
@@ -491,7 +493,7 @@ class GaussianHMMSampler(HMMSampler):
         return
 
 if __name__ == '__main__':
-    hs = GaussianHMMSampler(num_states = 2, sample_size = 2000, record_best = False, cl_mode=True, debug_mumble = True)
+    hs = GaussianHMMSampler(num_states = 2, sample_size = 2000, search = False, cl_mode=True, debug_mumble = True)
     hs.read_csv('./toydata/speed.csv.gz', obs_vars = ['rt'], group='corr')
     gt, tt = hs.do_inference()
     print(gt, tt)
