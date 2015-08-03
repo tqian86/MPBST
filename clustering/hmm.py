@@ -438,7 +438,7 @@ class GaussianHMMSampler(HMMSampler):
             output_folder += '/'
 
         # set up output samples file and write the header
-        self.sample_fp = gzip.open(output_folder + '{0}-gaussian-hmm-samples.csv.gz'.format(self.source_filename), 'w')
+        self.sample_fp = gzip.open(self.sample_fn, 'w')
         header = ['iteration', 'loglik', 'dimension', 'state'] + ['mu_{0}'.format(_) for _ in self.flat_obs_vars]
 
         # temporary measure - list singletons
@@ -473,6 +473,7 @@ class GaussianHMMSampler(HMMSampler):
                 self.loglik = self._logprob((new_means, new_covs, new_trans_p, new_states))
                 self._save_sample(iteration = i)
                 
+        self.sample_fp.close()
         self.total_time += time() - begin_time
         
         return self.gpu_time, self.total_time
