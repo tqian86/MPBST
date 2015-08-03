@@ -1,5 +1,5 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# cython: profile=True
 """Gibbs samplers of Hidden Markov Models with OpenCL support.
 
 This module implements Gibbs samplers of Hidden Markov Models (HMMs). An HMM is used to model the 
@@ -51,20 +51,21 @@ Planned models:
 - HMM with categorical emission probability distributions
 """
 
-
 from __future__ import print_function, division
 
 import sys, os.path, gzip
+import cython; cimport cython
 
 import MPBST
 from MPBST import *
 import itertools
-import numpy as np
+import numpy as np; cimport numpy as np
 from scipy.stats import multivariate_normal
 from collections import Counter
 from time import time
+from libc.math cimport exp, log, pow
 
-def multivariate_t(mu, Sigma, df, size=None):
+def multivariate_t(np.ndarray mu, np.ndarray Sigma, int df, size=None):
     '''
     Output:
     Produce size samples of d-dimensional multivariate t distribution
@@ -74,22 +75,21 @@ def multivariate_t(mu, Sigma, df, size=None):
     df = degrees of freedom
     size = # of samples to produce
     '''
-    d = len(Sigma)
+    cdef int d = len(Sigma)
     Z = np.random.multivariate_normal(np.zeros(d), Sigma, size)
     g = np.repeat(np.random.gamma(df/2, 2/df, size), d).reshape(Z.shape)
     return mu + Z/np.sqrt(g)
 
+def wishart(int df, np.ndarray Sigma, size=None):
 
-def wishart(df, Sigma, size=None):
-
-    dim = len(Sigma)
+    cdef int dim = len(Sigma)
     Z = np.random.multivariate_normal(np.zeros(dim), Sigma, df)
     return Z.T.dot(Z)
 
 class HMMSampler(BaseSampler):
 
-    def __init__(self, num_states, search = True, cl_mode = False, cl_device = None,
-                 sample_size = 1000, search_tolerance = 100, annealing = False, debug_mumble = False):
+    def __init__(self, int num_states, search = True, int search_tolerance = 100, cl_mode = False, cl_device = None,
+                 int sample_size = 1000, annealing = False, debug_mumble = False):
         """Initialize the base HMM sampler.
         """
         BaseSampler.__init__(self,
@@ -103,13 +103,21 @@ class HMMSampler(BaseSampler):
 
         self.data = None
         self.num_states = num_states
-        self.uniq_states = np.linspace(1, self.num_states, self.num_states).astype(np.int64)
-        self.trans_p_matrix = np.random.random((num_states+1, num_states+1))
-        self.trans_p_matrix = self.trans_p_matrix / self.trans_p_matrix.sum(axis=1)
-        self.SEQ_BEGIN, self.SEQ_END = 1, 2
+        cdef np.ndarray[long, ndim=1] uniq_states = np.linspace(1, self.num_states, self.num_states).astype(np.int64)
+        self.uniq_states = uniq_states
+        
+        cdef np.ndarray[np.float_t, ndim=2] trans_p_matrix
+        trans_p_matrix = np.random.random((num_states+1, num_states+1))
+        trans_p_matrix = trans_p_matrix / trans_p_matrix.sum(axis=1)
+        self.trans_p_matrix = trans_p_matrix
+
+        cdef int SEQ_BEGIN, SEQ_END
+        SEQ_BEGIN, SEQ_END = 1, 2
+        self.SEQ_BEGIN, self.SEQ_END = SEQ_BEGIN, SEQ_END
+        
         self.str_output_lines = []
         
-    def read_csv(self, filepath, obs_vars = ['obs'], group = None, timestamp = None, header = True):
+    def read_csv(self, str filepath, list obs_vars = ['obs'], str group = None, str timestamp = None, header = True):
         """Read data from a csv file and check for observations. 
 
         Time series data are expected to be stored in columns, rather than rows of various lengths.
@@ -179,46 +187,59 @@ class HMMSampler(BaseSampler):
             timestamp = '_time_stamp_'
             self.original_data['_time_stamp_'] = range(self.N)
 
+        # define boundary mask
+        cdef np.ndarray[np.int_t, ndim = 1] boundary_mask
+        
         if group is None:
             self.original_data.sort(columns = timestamp, inplace=True)
             self.data = self.original_data[obs_vars]
-            self.boundary_mask = np.zeros(self.N, dtype=np.int32)
-            self.boundary_mask[0] = self.SEQ_BEGIN
-            self.boundary_mask[-1] = self.SEQ_END
+            boundary_mask = np.zeros(self.N, dtype=np.int)
+            boundary_mask[0] = self.SEQ_BEGIN
+            boundary_mask[-1] = self.SEQ_END
+            self.boundary_mask = boundary_mask
         else:
             self.original_data.sort(columns = [group, timestamp], inplace=True)
             self.data = self.original_data[obs_vars]
-            self.boundary_mask = np.zeros(self.N, dtype=np.int32)
+            boundary_mask = np.zeros(self.N, dtype=np.int)
             rle_values, rle_lengths = zip(*[(k, len(list(g))) for k, g in itertools.groupby(self.original_data[group])])
             boundary_begins = np.array(rle_lengths).cumsum() - rle_lengths
             boundary_ends = np.array(rle_lengths).cumsum() - 1
-            self.boundary_mask[boundary_begins] = self.SEQ_BEGIN
-            self.boundary_mask[boundary_ends] = self.SEQ_END
-            
-        self.states = np.random.randint(low = 1, high = self.num_states + 1, size = self.N).astype(np.int32)
+            boundary_mask[boundary_begins] = self.SEQ_BEGIN
+            boundary_mask[boundary_ends] = self.SEQ_END
+            self.boundary_mask = boundary_mask
+
+        # define states
+        cdef np.ndarray[np.int_t, ndim = 1] states
+        states = np.random.randint(low = 1, high = self.num_states + 1, size = self.N).astype(np.int)
+        self.states = states
 
         if self.cl_mode:
             self.d_obs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
                                    hostbuf = np.array(self.data, dtype=np.float32, order='C'))
 
+    @cython.boundscheck(False)
     def _infer_trans_p(self):
         """Infer the transitional probabilities betweenn states without OpenCL.
         """
         # copy the current transition prob matrix; this is needed for search mode
-        new_trans_p_matrix = np.empty_like(self.trans_p_matrix)
+        cdef np.ndarray[np.float_t, ndim = 2] new_trans_p_matrix = np.empty_like(self.trans_p_matrix)
         new_trans_p_matrix[:] = self.trans_p_matrix[:]
         
         # make bigram pairs for easier counting
-        pairs = zip(self.states[:self.N-1], self.states[1:])
+        cdef list pairs = zip(self.states[:self.N-1], self.states[1:])
 
         # add also pairs made up by boundary marks 
-        begin_states = self.states[self.boundary_mask == self.SEQ_BEGIN]
+        cdef np.ndarray[np.int_t, ndim = 1] begin_states, end_states
+        cdef long SEQ_BEGIN = self.SEQ_BEGIN, SEQ_END = self.SEQ_END
+        
+        begin_states = self.states[self.boundary_mask == SEQ_BEGIN]
         pairs.extend(zip([0] * begin_states.shape[0], begin_states))
-        end_states = self.states[self.boundary_mask == self.SEQ_END]
+        end_states = self.states[self.boundary_mask == SEQ_END]
         pairs.extend(zip(end_states, [0] * begin_states.shape[0]))
 
         pair_count = Counter(pairs)
-        
+
+        cdef long state_from, state_to, count_from_state
         for state_from in np.insert(self.uniq_states, 0, 0):
             count_from_state = np.sum([_[0] == state_from for _ in pairs])
             for state_to in np.insert(self.uniq_states, 0, 0):
@@ -228,16 +249,28 @@ class HMMSampler(BaseSampler):
         new_trans_p_matrix[0] = new_trans_p_matrix[0] / new_trans_p_matrix[0].sum()
                 
         return new_trans_p_matrix
-            
+
+cdef np.ndarray[np.int_t, ndim=2] _gaussian_mu0(int dim):
+    return np.zeros((1, dim))
+
+cdef int _gaussian_k0(int dim):
+    return 1
+
+cdef np.ndarray[np.int_t, ndim=2] _wishart_T0(int dim):
+    return np.eye(dim)
+
+cdef int _wishart_v0(int dim):
+    return dim
+
 class GaussianHMMSampler(HMMSampler):
 
-    def __init__(self, num_states, search = True, cl_mode = False, cl_device = None,
-                 sample_size = 1000, search_tolerance = 100, annealing = False, debug_mumble = False):
+    def __init__(self, int num_states, search = True, int search_tolerance = 100,
+                 cl_mode = False, cl_device = None,
+	         int sample_size = 1000, annealing = False, debug_mumble = False):
         """Initialize the base HMM sampler.
         """
         HMMSampler.__init__(self, num_states = num_states,
-                            search = search,
-                            search_tolerance = search_tolerance,
+                            search = search, search_tolerance = search_tolerance,
                             cl_mode = cl_mode, cl_device = cl_device,
                             sample_size = sample_size,
                             annealing = annealing,
@@ -250,7 +283,7 @@ class GaussianHMMSampler(HMMSampler):
             program_str = open(MPBST.__path__[0] + '/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
         
-    def read_csv(self, filepath, obs_vars = ['obs'], group = None, timestamp = None, header = True):
+    def read_csv(self, str filepath, list obs_vars = ['obs'], str group = None, str timestamp = None, header = True):
         """Read data from a csv file and set up means and covariance matrices for the Gaussian
         generative model.
         """
@@ -260,83 +293,95 @@ class GaussianHMMSampler(HMMSampler):
         HMMSampler.read_csv(self, filepath, obs_vars = flat_obs_vars, group = group,
                             timestamp = timestamp, header = header)
 
+        cdef long s
+
         self.num_var = len(flat_obs_vars)
         self.num_cov_var = np.sum([len(_) ** 2 if type(_) is list else 1 for _ in obs_vars])
         self.num_var_set = len(obs_vars)
-        self.means = [[np.zeros(len(_)) if type(_) is list else np.zeros(1) for _ in obs_vars] for s in xrange(self.num_states)]
-        self.covs = [[np.eye(len(_)) if type(_) is list else np.eye(1) for _ in obs_vars] for s in xrange(self.num_states)]
+
+        cdef list means, covs
+        means = [[np.zeros(len(_)) if type(_) is list else np.zeros(1) for _ in obs_vars] for s in xrange(self.num_states)]
+        covs = [[np.eye(len(_)) if type(_) is list else np.eye(1) for _ in obs_vars] for s in xrange(self.num_states)]
+        self.means, self.covs = means, covs
         
-        return
+        return True
 
-    def _gaussian_mu0(self, dim):
-        return np.zeros((1, dim))
-
-    def _gaussian_k0(self, dim):
-        return 1
-
-    def _wishart_T0(self, dim):
-        return np.eye(dim)
-
-    def _wishart_v0(self, dim):
-        return dim
-        
+    @cython.boundscheck(False)
     def _infer_states(self):
         """Infer the state of each observation without OpenCL.
         """
+        cdef int num_states = self.num_states
+        cdef int nth_boundary_mask
+        cdef int SEQ_BEGIN = self.SEQ_BEGIN, SEQ_END = self.SEQ_END, N = self.N
+        
         # copy the states first, this is needed for search mode
-        new_states = np.empty_like(self.states); new_states[:] = self.states[:]
+        cdef np.ndarray[np.int_t, ndim=1] new_states = np.empty(self.states.shape, dtype=np.int);
+        new_states[:] = self.states[:]
         
         # set up grid for storing log probabilities
-        state_logp = np.empty((self.N, self.num_states))
-        emit_logp = np.empty((self.N, self.num_states))
+        cdef np.ndarray[np.float_t, ndim=2] emit_logp = np.empty((N, num_states))
+
+        cdef long var_set_idx, state_idx, state, nth
+        cdef long num_var_set = self.num_var_set
+        cdef np.ndarray[np.int_t, ndim=1] uniq_states = self.uniq_states
+        cdef np.ndarray[np.int_t, ndim=1] boundary_mask = self.boundary_mask
 
         # emission probabilities can be calculated in one pass
-        for var_set_idx in xrange(len(self.obs_vars)):
+        for var_set_idx in xrange(num_var_set):
             var_set = self.obs_vars[var_set_idx]
-            obs_set = np.array(self.data[var_set])
-            for state in self.uniq_states:
+            obs_set = self.data[var_set]
+            for state_idx in xrange(num_states):
+                state = uniq_states[state_idx]
                 if var_set_idx == 0: emit_logp[:, state-1] = 0
                 emit_logp[:,state-1] += multivariate_normal.logpdf(obs_set,
                                                                    mean = self.means[state-1][var_set_idx],
                                                                    cov = self.covs[state-1][var_set_idx])
        
         # state probabilities need to be interated over
-        trans_logp = np.log(self.trans_p_matrix)
-        for nth in xrange(self.N):
-            is_beginning = self.boundary_mask[nth] == self.SEQ_BEGIN
-            is_end = self.boundary_mask[nth] == self.SEQ_END
-            
-            if is_beginning:
-                trans_prev_logp = trans_logp[0, 1:]#[np.log(1 / self.num_states)] * self.num_states
-            else:
-                trans_prev_logp = trans_logp[new_states[nth - 1], 1:]
+        cdef np.ndarray[np.float_t, ndim=1] state_logp = np.empty(num_states)
+        cdef np.ndarray[np.float_t, ndim=2] trans_p_matrix = self.trans_p_matrix
+        cdef long is_beginning, is_end
 
-            if is_end:
-                trans_next_logp = trans_logp[1:, 0]# * self.num_states
-            else:
-                trans_next_logp = trans_logp[1:, new_states[nth + 1]]
+        for nth in xrange(N):
+            nth_boundary_mask = boundary_mask[nth]
 
-            state_logp[nth] = trans_prev_logp + trans_next_logp
+            for state_idx in xrange(num_states):
+                state = uniq_states[state_idx]
+                if nth_boundary_mask == SEQ_BEGIN:
+                    state_logp[state_idx] = log(trans_p_matrix[0, state])
+                else:
+                    state_logp[state_idx] = log(trans_p_matrix[new_states[nth - 1], state])
+
+                if nth_boundary_mask == SEQ_END:
+                    state_logp[state_idx] += log(trans_p_matrix[state, 0])
+                else:
+                    state_logp[state_idx] += log(trans_p_matrix[state, new_states[nth + 1]])
 
             # resample state
-            new_states[nth] = sample(a = self.uniq_states,
-                                     p = lognormalize(x = state_logp[nth] + emit_logp[nth], temp = self.annealing_temp))
-            
+            new_states[nth] = sample(a = uniq_states,
+                                     p = lognormalize(x = state_logp + emit_logp[nth], temp = self.annealing_temp))
+
         return new_states
 
+    @cython.boundscheck(False)
     def _infer_means_covs(self):
         """Infer the means of each hidden state without OpenCL.
         """
-        new_means = [[np.zeros(len(_)) if type(_) is list else np.zeros(1) for _ in self.obs_vars] for s in xrange(self.num_states)]
-        new_covs = [[np.eye(len(_)) if type(_) is list else np.eye(1) for _ in self.obs_vars] for s in xrange(self.num_states)]
+        cdef long s, var_set_idx, obs_dim, state, state_idx, n, v_n, df, k_n
+        cdef np.ndarray obs, cluster_obs
+        cdef long num_states = self.num_states
+        
+        cdef list new_means = [[np.zeros(len(_)) if type(_) is list else np.zeros(1) for _ in self.obs_vars] for s in xrange(num_states)]
+        cdef list new_covs = [[np.eye(len(_)) if type(_) is list else np.eye(1) for _ in self.obs_vars] for s in xrange(num_states)]
 
-        for var_set_idx in xrange(len(self.obs_vars)):
+        for var_set_idx in xrange(self.num_var_set):
             var_set = self.obs_vars[var_set_idx]
             if type(var_set) is str: obs_dim = 1
             else: obs_dim = len(var_set)
             obs = np.array(self.data[var_set])
 
-            for state in self.uniq_states:
+            for state_idx in xrange(num_states):
+                state = self.uniq_states[state_idx]
                 
                 # get observations currently assigned to this state
                 cluster_obs = obs[np.where(self.states == state)]
@@ -349,17 +394,17 @@ class GaussianHMMSampler(HMMSampler):
                     mu = cluster_obs.mean(axis = 0)
 
                 obs_deviance = cluster_obs - mu
-                mu0_deviance = mu - self._gaussian_mu0(dim = obs_dim)
-                cov_obs = np.dot(obs_deviance.T, obs_deviance)
+                mu0_deviance = mu - _gaussian_mu0(dim = obs_dim)
+                cov_obs = obs_deviance.T.dot(obs_deviance)
                 cov_mu0 = np.dot(mu0_deviance.T, mu0_deviance)
 
-                v_n = self._wishart_v0(obs_dim) + n
-                k_n = self._gaussian_k0(obs_dim) + n
-                T_n = self._wishart_T0(obs_dim) + cov_obs + cov_mu0 * self._gaussian_k0(obs_dim) * n / k_n
+                v_n = _wishart_v0(obs_dim) + n
+                k_n = _gaussian_k0(obs_dim) + n
+                T_n = _wishart_T0(obs_dim) + cov_obs + cov_mu0 * _gaussian_k0(obs_dim) * n / k_n
 
                 # new mu is sampled from a multivariate t with the following parameters
                 df = v_n - obs_dim + 1
-                mu_n = (self._gaussian_k0(obs_dim) * self._gaussian_mu0(obs_dim) + n * mu) / k_n
+                mu_n = (_gaussian_k0(obs_dim) * _gaussian_mu0(obs_dim) + n * mu) / k_n
                 Sigma = T_n / (k_n * df)
 
                 # means and covs are sampled independently since close solutions exist and
@@ -369,17 +414,25 @@ class GaussianHMMSampler(HMMSampler):
                 new_means[state-1][var_set_idx][:] = multivariate_t(mu = mu_n, Sigma = Sigma, df = df)
                 # resample the covariance matrix
                 new_covs[state-1][var_set_idx][:] = np.linalg.inv(wishart(Sigma = np.linalg.inv(T_n), df = v_n))
-                
+
         # a hacky but surprisingly effective way to alleviate label switching
-        m = np.array([new_means[_][0][0] for _ in xrange(self.num_states)])
+        m = np.array([new_means[_][0][0] for _ in xrange(num_states)])
         reindex = m.argsort()
         new_means = [new_means[i] for i in reindex]
         new_covs = [new_covs[i] for i in reindex]
         return new_means, new_covs
 
+    @cython.boundscheck(False)
     def _logprob(self, sample):
         """Calculate the log probability of model and data.
         """
+        cdef np.ndarray[np.float_t, ndim = 2] trans_p
+        cdef np.ndarray joint_logp
+        cdef np.ndarray[np.int_t, ndim = 1] states
+        cdef list means, covs
+        cdef long var_set_idx, i, state
+        cdef float gpu_begin_time
+        
         means, covs, trans_p, states = sample
 
         if self.cl_mode:
@@ -402,23 +455,24 @@ class GaussianHMMSampler(HMMSampler):
             d_var_set_sq_offset = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf = var_set_sq_offset.astype(np.float32))
             
             d_joint_logp = cl.Buffer(self.ctx, self.mf.READ_WRITE | self.mf.COPY_HOST_PTR, hostbuf = joint_logp)
+
             self.cl_prg.calc_joint_logp(self.queue, (self.N, self.num_var_set), None,
                                         self.d_obs, d_states, d_trans_p, d_means, d_cov_dets, d_cov_invs,
                                         d_var_set_dim, d_var_set_linear_offset, d_var_set_sq_offset, d_joint_logp,
                                         np.int32(self.num_states), np.int32(self.num_var), np.int32(self.num_cov_var))
+
             cl.enqueue_copy(self.queue, joint_logp, d_joint_logp)
             self.gpu_time += time() - gpu_begin_time
 
         else:
-            gpu_time = time()
-            joint_logp = np.empty(self.N)
+            joint_logp = np.empty(self.N, dtype=np.float32)
             
             # calculate transition probabilities first
             joint_logp[0] = np.log(trans_p[0, states[0]])
             joint_logp[1:] = np.log(trans_p[states[:self.N-1], states[1:]])
 
             # then emission probs
-            for var_set_idx in xrange(len(self.obs_vars)):
+            for var_set_idx in xrange(self.num_var_set):
                 var_set = self.obs_vars[var_set_idx]
                 for state in self.uniq_states:
                     indices = np.where(states == state)
@@ -426,12 +480,14 @@ class GaussianHMMSampler(HMMSampler):
                     joint_logp[indices] += multivariate_normal.logpdf(obs_set,
                                                                       mean = means[state-1][var_set_idx],
                                                                       cov = covs[state-1][var_set_idx])
-            self.gpu_time += time() - gpu_time
         return joint_logp.sum()
 
-    def do_inference(self, output_folder = None):
+    def do_inference(self, str output_folder = None):
         """Perform inference on parameters.
         """
+        cdef list header, obs_vars
+        cdef int i
+        
         if output_folder is None:
             output_folder = self.source_dirname
         else:
@@ -472,29 +528,33 @@ class GaussianHMMSampler(HMMSampler):
                 self.means, self.covs, self.trans_p_matrix, self.states = new_means, new_covs, new_trans_p, new_states
                 self.loglik = self._logprob((new_means, new_covs, new_trans_p, new_states))
                 self._save_sample(iteration = i)
-                
-        self.sample_fp.close()
+
         self.total_time += time() - begin_time
-        
+
+        self.sample_fp.close()
         return self.gpu_time, self.total_time
 
-    
-    def _save_sample(self, iteration):
+    @cython.boundscheck(False)
+    def _save_sample(self, long iteration):
         """Save the means and covariance matrices from the current iteration.
         """
-        for state in self.uniq_states:
-            row = [iteration, self.loglik, self.num_var, state]
-            row += list(np.hstack(self.means[state-1]))
-            row += list(np.hstack([np.ravel(_) for _ in self.covs[state-1]]))
-            row += [self.trans_p_matrix[0, state], self.trans_p_matrix[state, 0]]
-            row += list(np.ravel(self.trans_p_matrix[state, 1:]))
+        cdef np.ndarray[np.int_t, ndim=1] uniq_states = self.uniq_states
+        cdef np.ndarray[np.float_t, ndim=2] trans_p_matrix = self.trans_p_matrix
+        cdef np.ndarray[np.float_t, ndim=2] cov
+        cdef int num_states = self.num_states
+        cdef int state, state_idx
+        cdef double loglik = self.loglik
+        cdef int num_var = self.num_var
+        cdef list row, covs = self.covs, means = self.means
+        for state_idx in xrange(num_states):
+            state = uniq_states[state_idx]
+            row = [iteration, loglik, num_var, state]
+            row += list(np.hstack(means[state-1]))
+            row += list(np.hstack([np.ravel(cov) for cov in covs[state-1]]))
+            row += [trans_p_matrix[0, state], trans_p_matrix[state, 0]]
+            row += list(np.ravel(trans_p_matrix[state, 1:]))
             row += list((self.states == state).astype(np.bool).astype(np.int0))
+
             self.sample_fp.write(','.join([str(_) for _ in row]) + '\n')
                 
         return
-
-if __name__ == '__main__':
-    hs = GaussianHMMSampler(num_states = 2, sample_size = 2000, search = False, cl_mode=True, debug_mumble = True)
-    hs.read_csv('./toydata/speed.csv.gz', obs_vars = ['rt'], group='corr')
-    gt, tt = hs.do_inference()
-    print(gt, tt)
