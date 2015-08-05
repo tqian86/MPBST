@@ -104,12 +104,12 @@ class HMMSampler(BaseSampler):
         self.data = None
         self.num_states = num_states
         self.uniq_states = np.linspace(1, self.num_states, self.num_states).astype(np.int64)
-        self.trans_p_matrix = np.random.random((num_states+1, num_states+1))
-        self.trans_p_matrix = self.trans_p_matrix / self.trans_p_matrix.sum(axis=1)
+        #self.trans_p_matrix = np.random.random((num_states+1, num_states+1))
+        #self.trans_p_matrix = self.trans_p_matrix / self.trans_p_matrix.sum(axis=1)
         self.SEQ_BEGIN, self.SEQ_END = 1, 2
         self.str_output_lines = []
         
-    def read_csv(self, filepath, obs_vars = ['obs'], group = None, timestamp = None, header = True):
+    def read_csv(self, filepath, obs_vars = ['obs'], seq_id = None, timestamp = None, group = None, header = True):
         """Read data from a csv file and check for observations. 
 
         Time series data are expected to be stored in columns, rather than rows of various lengths.
@@ -141,13 +141,12 @@ class HMMSampler(BaseSampler):
 
         ----------
 
-        - Groups can be specified via the "group" argument. The argument expects the name of the
-        column whose values are labels of groups. The current HMMs only support one grouping
-        factor. Future versions may introduce support for nested groups. 
+        - Individual observation sequences can be separated by specifying the "seq_id" argument. 
+        The argument expects the name of the column whose values are labels of observation sequences.
 
-        For instance, if "group" is specified as the grouping variable, and the data set
+        For instance, if "subject" is specified as the sequence identifier, and the data set
 
-        outcome,group
+        outcome,subject
         1,1
         2,1
         3,1
@@ -169,27 +168,43 @@ class HMMSampler(BaseSampler):
         as the timestamp order.
         
         """
-        BaseSampler.read_csv(self,
-                             filepath = filepath,
-                             obs_vars = obs_vars,
-                             header = header)
+        BaseSampler.read_csv(self, filepath = filepath, obs_vars = obs_vars, header = header)
 
         # create timestamp using row number if no timestamp is supplied
         if timestamp is None:
             timestamp = '_time_stamp_'
             self.original_data['_time_stamp_'] = range(self.N)
 
+        def _make_trans_p_matrix(num_states):
+            trans_p_matrix = np.random.random((num_states+1, num_states+1))
+            return trans_p_matrix / trans_p_matrix.sum(axis=1)
+            
+        # create multiple transition matrices if group is supplied
         if group is None:
+            self.group_labels = ['__all__']; self.num_groups = 1
+            self.group_idx_mask = np.zeros(self.N, dtype=np.int)
+        else:
+            self.group_labels = np.unique(self.original_data[group])
+            self.num_groups = self.group_labels.shape[0]
+            self.group_idx_mask = np.empty(self.N, dtype=np.int)
+            for group_idx in xrange(self.num_groups):
+                group_label = self.group_labels[group_idx]
+                self.group_idx_mask[np.where(self.original_data[group] == group_label)] = group_idx
+            
+        self.trans_p_matrices = [_make_trans_p_matrix(self.num_states) for _ in xrange(self.num_groups)]
+            
+        # create boundary markers if seq_id is supplied
+        if seq_id is None:
             self.original_data.sort(columns = timestamp, inplace=True)
             self.data = self.original_data[obs_vars]
             self.boundary_mask = np.zeros(self.N, dtype=np.int32)
             self.boundary_mask[0] = self.SEQ_BEGIN
             self.boundary_mask[-1] = self.SEQ_END
         else:
-            self.original_data.sort(columns = [group, timestamp], inplace=True)
+            self.original_data.sort(columns = [seq_id, timestamp], inplace=True)
             self.data = self.original_data[obs_vars]
             self.boundary_mask = np.zeros(self.N, dtype=np.int32)
-            rle_values, rle_lengths = zip(*[(k, len(list(g))) for k, g in itertools.groupby(self.original_data[group])])
+            rle_values, rle_lengths = zip(*[(k, len(list(g))) for k, g in itertools.groupby(self.original_data[seq_id])])
             boundary_begins = np.array(rle_lengths).cumsum() - rle_lengths
             boundary_ends = np.array(rle_lengths).cumsum() - 1
             self.boundary_mask[boundary_begins] = self.SEQ_BEGIN
@@ -202,34 +217,43 @@ class HMMSampler(BaseSampler):
                                    hostbuf = np.array(self.data, dtype=np.float32, order='C'))
 
     def _infer_trans_p(self):
-        """Infer the transitional probabilities betweenn states without OpenCL.
+        """Infer the transitional probabilities between states without OpenCL.
         """
-        # copy the current transition prob matrix; this is needed for search mode
-        new_trans_p_matrix = np.empty_like(self.trans_p_matrix)
-        new_trans_p_matrix[:] = self.trans_p_matrix[:]
-        
-        # make bigram pairs for easier counting
-        to_indices = np.where(self.boundary_mask != self.SEQ_BEGIN)[0]
-        from_indices = to_indices - 1
-        pairs = zip(self.states[from_indices], self.states[to_indices])
+        trans_p_matrices = [None] * len(self.trans_p_matrices)
+        trans_p_matrix_shape = self.trans_p_matrices[0].shape
+        for group_idx in xrange(self.num_groups):
+            
+            # copy the current transition prob matrix; this is needed for search mode
+            new_trans_p_matrix = np.empty(trans_p_matrix_shape)
+            new_trans_p_matrix[:] = self.trans_p_matrices[group_idx][:]
 
-        # add also pairs made up by boundary marks 
-        begin_states = self.states[self.boundary_mask == self.SEQ_BEGIN]
-        pairs.extend(zip([0] * begin_states.shape[0], begin_states))
-        end_states = self.states[self.boundary_mask == self.SEQ_END]
-        pairs.extend(zip(end_states, [0] * begin_states.shape[0]))
+            # retrieve bigram pairs belonging to this group
+            to_indices = np.where((self.group_mask == group_idx) & (self.boundary_mask != self.SEQ_BEGIN))[0]
+            from_indices = to_indices - 1
+            
+            # make bigram pairs for easier counting
+            pairs = zip(self.states[from_indices], self.states[to_indices])
 
-        pair_count = Counter(pairs)
-        
-        for state_from in np.insert(self.uniq_states, 0, 0):
-            count_from_state = np.sum([_[0] == state_from for _ in pairs])
-            for state_to in np.insert(self.uniq_states, 0, 0):
-                new_trans_p_matrix[state_from, state_to] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + self.num_states + 1)
+            # add also pairs made up by boundary marks 
+            begin_states = self.states[(self.group_mask == group_idx) & (self.boundary_mask == self.SEQ_BEGIN)]
+            pairs.extend(zip([0] * begin_states.shape[0], begin_states))
+            end_states = self.states[(self.group_mask == group_idx) & (self.boundary_mask == self.SEQ_END)]
+            pairs.extend(zip(end_states, [0] * begin_states.shape[0]))
+            
+            pair_count = Counter(pairs)
 
-        new_trans_p_matrix[0, 0] = 0
-        new_trans_p_matrix[0] = new_trans_p_matrix[0] / new_trans_p_matrix[0].sum()
-                
-        return new_trans_p_matrix
+            # calculate the new parameters
+            for state_from in np.insert(self.uniq_states, 0, 0):
+                count_from_state = [_[0] for _ in pairs].count(state_from)
+                for state_to in np.insert(self.uniq_states, 0, 0):
+                    new_trans_p_matrix[state_from, state_to] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + self.num_states + 1)
+
+            new_trans_p_matrix[0, 0] = 0
+            new_trans_p_matrix[0] = new_trans_p_matrix[0] / new_trans_p_matrix[0].sum()
+
+            trans_p_matrices[group_idx] = new_trans_p_matrix
+
+        return trans_p_matrices
             
 class GaussianHMMSampler(HMMSampler):
 
@@ -252,15 +276,15 @@ class GaussianHMMSampler(HMMSampler):
             program_str = open(MPBST.__path__[0] + '/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
         
-    def read_csv(self, filepath, obs_vars = ['obs'], group = None, timestamp = None, header = True):
+    def read_csv(self, filepath, obs_vars = ['obs'], seq_id = None, timestamp = None, group = None, header = True):
         """Read data from a csv file and set up means and covariance matrices for the Gaussian
         generative model.
         """
         flat_obs_vars = list(np.hstack(obs_vars))
         self.obs_vars = obs_vars; self.flat_obs_vars = flat_obs_vars
 
-        HMMSampler.read_csv(self, filepath, obs_vars = flat_obs_vars, group = group,
-                            timestamp = timestamp, header = header)
+        HMMSampler.read_csv(self, filepath, obs_vars = flat_obs_vars, seq_id = seq_id,
+                            timestamp = timestamp, group = group, header = header)
 
         self.num_var = len(flat_obs_vars)
         self.num_cov_var = np.sum([len(_) ** 2 if type(_) is list else 1 for _ in obs_vars])
@@ -303,20 +327,22 @@ class GaussianHMMSampler(HMMSampler):
                                                                    cov = self.covs[state-1][var_set_idx])
        
         # state probabilities need to be interated over
-        trans_logp = np.log(self.trans_p_matrix)
         for nth in xrange(self.N):
+            group_idx = self.group_idx_mask[nth]
+            trans_p_matrix = self.trans_p_matrices[group_idx]
             is_beginning = self.boundary_mask[nth] == self.SEQ_BEGIN
             is_end = self.boundary_mask[nth] == self.SEQ_END
             
             if is_beginning:
-                trans_prev_logp = trans_logp[0, 1:]#[np.log(1 / self.num_states)] * self.num_states
+                trans_prev_logp = np.log(trans_p_matrix[0, 1:])
             else:
-                trans_prev_logp = trans_logp[new_states[nth - 1], 1:]
+                trans_prev_logp = np.log(trans_p_matrix[new_states[nth - 1], 1:])
 
             if is_end:
-                trans_next_logp = trans_logp[1:, 0]# * self.num_states
+                trans_next_logp = np.log(trans_p_matrix[1:, 0])
             else:
-                trans_next_logp = trans_logp[1:, new_states[nth + 1]]
+                next_group_idx = self.group_idx_mask[nth + 1]
+                trans_next_logp = np.log(self.trans_p_matrices[next_group_idx][1:, new_states[nth + 1]])
 
             state_logp[nth] = trans_prev_logp + trans_next_logp
 
@@ -446,8 +472,10 @@ class GaussianHMMSampler(HMMSampler):
         # temporary measure - list singletons
         obs_vars = [[_] if type(_) is str else _ for _ in self.obs_vars]
         header += ['cov_{0}_{1}'.format(*_) for _ in itertools.chain(*[itertools.product(*[_] * 2) for _ in obs_vars])]
-        header += ['trans_p_from_bd', 'trans_p_to_bd']
-        header += ['trans_p_to_{0:d}'.format(_) for _ in self.uniq_states]
+        for group_idx in xrange(self.num_groups):
+            gl = self.group_labels[group_idx]
+            header += ['trans_p_from_bd_{0}'.format(gl), 'trans_p_to_bd_{0}'.format(gl)]
+            header += ['trans_p_to_{0:d}_{1}'.format(_, gl) for _ in self.uniq_states]
         header += ['has_obs_{0:d}'.format(_) for _ in range(1, self.N + 1)]
         self.sample_fp.write(','.join(header) + '\n')
         
@@ -469,9 +497,9 @@ class GaussianHMMSampler(HMMSampler):
                     self.loglik = self.best_sample[1]
                     self._save_sample(iteration = i)
                 if self.no_improvement(): break
-                self.means, self.covs, self.trans_p_matrix, self.states = new_means, new_covs, new_trans_p, new_states
+                self.means, self.covs, self.trans_p_matrices, self.states = new_means, new_covs, new_trans_p, new_states
             else:
-                self.means, self.covs, self.trans_p_matrix, self.states = new_means, new_covs, new_trans_p, new_states
+                self.means, self.covs, self.trans_p_matrices, self.states = new_means, new_covs, new_trans_p, new_states
                 self.loglik = self._logprob((new_means, new_covs, new_trans_p, new_states))
                 self._save_sample(iteration = i)
                 
@@ -488,15 +516,16 @@ class GaussianHMMSampler(HMMSampler):
             row = [iteration, self.loglik, self.num_var, state]
             row += list(np.hstack(self.means[state-1]))
             row += list(np.hstack([np.ravel(_) for _ in self.covs[state-1]]))
-            row += [self.trans_p_matrix[0, state], self.trans_p_matrix[state, 0]]
-            row += list(np.ravel(self.trans_p_matrix[state, 1:]))
+            for group_idx in xrange(self.num_groups):
+                row += [self.trans_p_matrices[group_idx][0, state], self.trans_p_matrices[state, 0]]
+                row += list(np.ravel(self.trans_p_matrices[group_idx][state, 1:]))
             row += list((self.states == state).astype(np.bool).astype(np.int0))
             self.sample_fp.write(','.join([str(_) for _ in row]) + '\n')
                 
         return
 
 if __name__ == '__main__':
-    hs = GaussianHMMSampler(num_states = 2, sample_size = 2000, search = False, cl_mode=True, debug_mumble = True)
-    hs.read_csv('./toydata/speed.csv.gz', obs_vars = ['rt'], group='corr')
+    hs = GaussianHMMSampler(num_states = 2, sample_size = 2000, search = False, cl_mode=False, debug_mumble = True)
+    hs.read_csv('./toydata/speed.csv.gz', obs_vars = ['rt'], seq_id='corr')
     gt, tt = hs.do_inference()
     print(gt, tt)
