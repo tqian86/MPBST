@@ -226,7 +226,9 @@ class HMMSampler(BaseSampler):
         new_trans_p_matrix[:] = self.trans_p_matrix[:]
         
         # make bigram pairs for easier counting
-        cdef list pairs = zip(self.states[:self.N-1], self.states[1:])
+        to_indices = np.where(self.boundary_mask != self.SEQ_BEGIN)[0]
+        from_indices = to_indices - 1
+        cdef list pairs = zip(self.states[from_indices], self.states[to_indices])
 
         # add also pairs made up by boundary marks 
         cdef np.ndarray[np.int_t, ndim = 1] begin_states, end_states
