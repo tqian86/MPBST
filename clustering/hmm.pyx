@@ -36,7 +36,7 @@ Input data
 ----------
 Input data can be read using the standard "read_csv" method of an initialized sampler. For example:
 
-hmm.read_csv("./data/data.csv", obs_vars = ["obs"], group = None, header = True, timestamp = None)
+hmm.read_csv("./data/data.csv", obs_vars = ["obs"], seq_id = None, header = True, timestamp = None)
 
 See the docstring of read_csv for details.
 
@@ -117,7 +117,7 @@ class HMMSampler(BaseSampler):
         
         self.str_output_lines = []
         
-    def read_csv(self, str filepath, list obs_vars = ['obs'], str group = None, str timestamp = None, header = True):
+    def read_csv(self, str filepath, list obs_vars = ['obs'], str seq_id = None, str timestamp = None, str group = None, header = True):
         """Read data from a csv file and check for observations. 
 
         Time series data are expected to be stored in columns, rather than rows of various lengths.
@@ -149,13 +149,12 @@ class HMMSampler(BaseSampler):
 
         ----------
 
-        - Groups can be specified via the "group" argument. The argument expects the name of the
-        column whose values are labels of groups. The current HMMs only support one grouping
-        factor. Future versions may introduce support for nested groups. 
+        - Individual observation sequences can be separated by specifying the "seq_id" argument. 
+        The argument expects the name of the column whose values are labels of observation sequences.
 
-        For instance, if "group" is specified as the grouping variable, and the data set
+        For instance, if "subject" is specified as the sequence identifier, and the data set
 
-        outcome,group
+        outcome,subject
         1,1
         2,1
         3,1
@@ -177,20 +176,35 @@ class HMMSampler(BaseSampler):
         as the timestamp order.
         
         """
-        BaseSampler.read_csv(self,
-                             filepath = filepath,
-                             obs_vars = obs_vars,
-                             header = header)
+        BaseSampler.read_csv(self, filepath = filepath, obs_vars = obs_vars, header = header)
 
         # create timestamp using row number if no timestamp is supplied
         if timestamp is None:
             timestamp = '_time_stamp_'
             self.original_data['_time_stamp_'] = range(self.N)
 
+        def _make_trans_p_matrix(num_states):
+            trans_p_matrix = np.random.random((num_states+1, num_states+1))
+            return trans_p_matrix / trans_p_matrix.sum(axis=1)
+            
+        # create multiple transition matrices if group is supplied
+        if group is None:
+            self.group_labels = ['__all__']; self.num_groups = 1
+            self.group_idx_mask = np.zeros(self.N, dtype=np.int)
+        else:
+            self.group_labels = np.unique(self.original_data[group])
+            self.num_groups = self.group_labels.shape[0]
+            self.group_idx_mask = np.empty(self.N, dtype=np.int)
+            for group_idx in xrange(self.num_groups):
+                group_label = self.group_labels[group_idx]
+                self.group_idx_mask[np.where(self.original_data[group] == group_label)] = group_idx
+            
+        self.trans_p_matrices = [_make_trans_p_matrix(self.num_states) for _ in xrange(self.num_groups)]
+
         # define boundary mask
         cdef np.ndarray[np.int_t, ndim = 1] boundary_mask
         
-        if group is None:
+        if seq_id is None:
             self.original_data.sort(columns = timestamp, inplace=True)
             self.data = self.original_data[obs_vars]
             boundary_mask = np.zeros(self.N, dtype=np.int)
@@ -219,38 +233,43 @@ class HMMSampler(BaseSampler):
 
     @cython.boundscheck(False)
     def _infer_trans_p(self):
-        """Infer the transitional probabilities betweenn states without OpenCL.
+        """Infer the transitional probabilities between states without OpenCL.
         """
-        # copy the current transition prob matrix; this is needed for search mode
-        cdef np.ndarray[np.float_t, ndim = 2] new_trans_p_matrix = np.empty_like(self.trans_p_matrix)
-        new_trans_p_matrix[:] = self.trans_p_matrix[:]
-        
-        # make bigram pairs for easier counting
-        to_indices = np.where(self.boundary_mask != self.SEQ_BEGIN)[0]
-        from_indices = to_indices - 1
-        cdef list pairs = zip(self.states[from_indices], self.states[to_indices])
+        trans_p_matrices = [None] * len(self.trans_p_matrices)
+        trans_p_matrix_shape = self.trans_p_matrices[0].shape
+        for group_idx in xrange(self.num_groups):
+            
+            # copy the current transition prob matrix; this is needed for search mode
+            new_trans_p_matrix = np.empty(trans_p_matrix_shape)
+            new_trans_p_matrix[:] = self.trans_p_matrices[group_idx][:]
 
-        # add also pairs made up by boundary marks 
-        cdef np.ndarray[np.int_t, ndim = 1] begin_states, end_states
-        cdef long SEQ_BEGIN = self.SEQ_BEGIN, SEQ_END = self.SEQ_END
-        
-        begin_states = self.states[self.boundary_mask == SEQ_BEGIN]
-        pairs.extend(zip([0] * begin_states.shape[0], begin_states))
-        end_states = self.states[self.boundary_mask == SEQ_END]
-        pairs.extend(zip(end_states, [0] * begin_states.shape[0]))
+            # retrieve bigram pairs belonging to this group
+            to_indices = np.where((self.group_idx_mask == group_idx) & (self.boundary_mask != self.SEQ_BEGIN))[0]
+            from_indices = to_indices - 1
+            
+            # make bigram pairs for easier counting
+            pairs = zip(self.states[from_indices], self.states[to_indices])
 
-        pair_count = Counter(pairs)
+            # add also pairs made up by boundary marks 
+            begin_states = self.states[(self.group_idx_mask == group_idx) & (self.boundary_mask == self.SEQ_BEGIN)]
+            pairs.extend(zip([0] * begin_states.shape[0], begin_states))
+            end_states = self.states[(self.group_idx_mask == group_idx) & (self.boundary_mask == self.SEQ_END)]
+            pairs.extend(zip(end_states, [0] * begin_states.shape[0]))
+            
+            pair_count = Counter(pairs)
 
-        cdef long state_from, state_to, count_from_state
-        for state_from in np.insert(self.uniq_states, 0, 0):
-            count_from_state = np.sum([_[0] == state_from for _ in pairs])
-            for state_to in np.insert(self.uniq_states, 0, 0):
-                new_trans_p_matrix[state_from, state_to] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + self.num_states + 1)
+            # calculate the new parameters
+            for state_from in np.insert(self.uniq_states, 0, 0):
+                count_from_state = [_[0] for _ in pairs].count(state_from)
+                for state_to in np.insert(self.uniq_states, 0, 0):
+                    new_trans_p_matrix[state_from, state_to] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + self.num_states + 1)
 
-        new_trans_p_matrix[0, 0] = 0
-        new_trans_p_matrix[0] = new_trans_p_matrix[0] / new_trans_p_matrix[0].sum()
-                
-        return new_trans_p_matrix
+            new_trans_p_matrix[0, 0] = 0
+            new_trans_p_matrix[0] = new_trans_p_matrix[0] / new_trans_p_matrix[0].sum()
+
+            trans_p_matrices[group_idx] = new_trans_p_matrix
+
+        return trans_p_matrices
 
 cdef np.ndarray[np.int_t, ndim=2] _gaussian_mu0(int dim):
     return np.zeros((1, dim))
@@ -285,15 +304,15 @@ class GaussianHMMSampler(HMMSampler):
             program_str = open(MPBST.__path__[0] + '/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
         
-    def read_csv(self, str filepath, list obs_vars = ['obs'], str group = None, str timestamp = None, header = True):
+    def read_csv(self, str filepath, list obs_vars = ['obs'], str seq_id = None, str timestamp = None, str group = None, header = True):
         """Read data from a csv file and set up means and covariance matrices for the Gaussian
         generative model.
         """
         flat_obs_vars = list(np.hstack(obs_vars))
         self.obs_vars = obs_vars; self.flat_obs_vars = flat_obs_vars
 
-        HMMSampler.read_csv(self, filepath, obs_vars = flat_obs_vars, group = group,
-                            timestamp = timestamp, header = header)
+        HMMSampler.read_csv(self, filepath, obs_vars = flat_obs_vars, seq_id = seq_id,
+                            timestamp = timestamp, group = group, header = header)
 
         cdef long s
 
@@ -341,30 +360,54 @@ class GaussianHMMSampler(HMMSampler):
        
         # state probabilities need to be interated over
         cdef np.ndarray[np.float_t, ndim=1] state_logp = np.empty(num_states)
-        cdef np.ndarray[np.float_t, ndim=2] trans_p_matrix = self.trans_p_matrix
+        cdef list trans_p_matrices = self.trans_p_matrices
         cdef long is_beginning, is_end
 
-        for nth in xrange(N):
+        # TODO: it might be worth writing things into loops as the commented out code below
+        for nth in xrange(self.N):
             nth_boundary_mask = boundary_mask[nth]
+            group_idx = self.group_idx_mask[nth]
+            cdef np.ndarray[np.float_t, ndim=2] trans_p_matrix = trans_p_matrices[group_idx]
+            
+            if nth_boundary_mask == SEQ_BEGIN:
+                trans_prev_logp = np.log(trans_p_matrix[0, 1:])
+            else:
+                trans_prev_logp = np.log(trans_p_matrix[new_states[nth - 1], 1:])
 
-            for state_idx in xrange(num_states):
-                state = uniq_states[state_idx]
-                if nth_boundary_mask == SEQ_BEGIN:
-                    state_logp[state_idx] = log(trans_p_matrix[0, state])
-                else:
-                    state_logp[state_idx] = log(trans_p_matrix[new_states[nth - 1], state])
+            if nth_boundary_mask == SEQ_END:
+                trans_next_logp = np.log(trans_p_matrix[1:, 0])
+            else:
+                next_group_idx = self.group_idx_mask[nth + 1]
+                trans_next_logp = np.log(trans_p_matrices[next_group_idx][1:, new_states[nth + 1]])
 
-                if nth_boundary_mask == SEQ_END:
-                    state_logp[state_idx] += log(trans_p_matrix[state, 0])
-                else:
-                    state_logp[state_idx] += log(trans_p_matrix[state, new_states[nth + 1]])
+            state_logp[nth] = trans_prev_logp + trans_next_logp
 
             # resample state
             new_states[nth] = sample(a = uniq_states,
-                                     p = lognormalize(x = state_logp + emit_logp[nth], temp = self.annealing_temp))
+                                     p = lognormalize(x = state_logp[nth] + emit_logp[nth], temp = self.annealing_temp))
+
+        #for nth in xrange(N):
+        #    nth_boundary_mask = boundary_mask[nth]
+
+        #    for state_idx in xrange(num_states):
+        #        state = uniq_states[state_idx]
+        #        if nth_boundary_mask == SEQ_BEGIN:
+        #            state_logp[state_idx] = log(trans_p_matrix[0, state])
+        #        else:
+        #            state_logp[state_idx] = log(trans_p_matrix[new_states[nth - 1], state])
+
+        #        if nth_boundary_mask == SEQ_END:
+        #            state_logp[state_idx] += log(trans_p_matrix[state, 0])
+        #        else:
+        #            state_logp[state_idx] += log(trans_p_matrix[state, new_states[nth + 1]])
+
+        #    # resample state
+        #    new_states[nth] = sample(a = uniq_states,
+        #                             p = lognormalize(x = state_logp + emit_logp[nth], temp = self.annealing_temp))
 
         return new_states
 
+    # TODO: anything below this line has not been yet converted to MTM
     @cython.boundscheck(False)
     def _infer_means_covs(self):
         """Infer the means of each hidden state without OpenCL.
