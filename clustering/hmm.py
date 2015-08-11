@@ -36,7 +36,7 @@ Input data
 ----------
 Input data can be read using the standard "read_csv" method of an initialized sampler. For example:
 
-hmm.read_csv("./data/data.csv", obs_vars = ["obs"], group = None, header = True, timestamp = None)
+hmm.read_csv("./data/data.csv", obs_vars = ["obs"], seq_id = None, header = True, timestamp = None)
 
 See the docstring of read_csv for details.
 
@@ -58,7 +58,7 @@ import sys, os.path, gzip
 
 import MPBST
 from MPBST import *
-import itertools
+import itertools, pprint
 import numpy as np
 from scipy.stats import multivariate_normal
 from collections import Counter
@@ -228,16 +228,16 @@ class HMMSampler(BaseSampler):
             new_trans_p_matrix[:] = self.trans_p_matrices[group_idx][:]
 
             # retrieve bigram pairs belonging to this group
-            to_indices = np.where((self.group_mask == group_idx) & (self.boundary_mask != self.SEQ_BEGIN))[0]
+            to_indices = np.where((self.group_idx_mask == group_idx) & (self.boundary_mask != self.SEQ_BEGIN))[0]
             from_indices = to_indices - 1
             
             # make bigram pairs for easier counting
             pairs = zip(self.states[from_indices], self.states[to_indices])
 
             # add also pairs made up by boundary marks 
-            begin_states = self.states[(self.group_mask == group_idx) & (self.boundary_mask == self.SEQ_BEGIN)]
+            begin_states = self.states[(self.group_idx_mask == group_idx) & (self.boundary_mask == self.SEQ_BEGIN)]
             pairs.extend(zip([0] * begin_states.shape[0], begin_states))
-            end_states = self.states[(self.group_mask == group_idx) & (self.boundary_mask == self.SEQ_END)]
+            end_states = self.states[(self.group_idx_mask == group_idx) & (self.boundary_mask == self.SEQ_END)]
             pairs.extend(zip(end_states, [0] * begin_states.shape[0]))
             
             pair_count = Counter(pairs)
@@ -440,10 +440,25 @@ class GaussianHMMSampler(HMMSampler):
         else:
             gpu_time = time()
             joint_logp = np.empty(self.N)
-            
+
+            joint_logp[0] = 0
             # calculate transition probabilities first
-            joint_logp[0] = np.log(trans_p[0, states[0]])
-            joint_logp[1:] = np.log(trans_p[states[:self.N-1], states[1:]])
+            for group_idx in xrange(self.num_groups):
+            
+                # retrieve bigram pairs belonging to this group
+                to_indices = np.where((self.group_idx_mask == group_idx) & (self.boundary_mask != self.SEQ_BEGIN))[0]
+                from_indices = to_indices - 1
+
+                # add also pairs made up by boundary marks 
+                begin_states = self.states[(self.group_idx_mask == group_idx) & (self.boundary_mask == self.SEQ_BEGIN)]
+                np.append(from_indices, [0] * begin_states.shape[0])
+                np.append(to_indices, begin_states)
+                end_states = self.states[(self.group_idx_mask == group_idx) & (self.boundary_mask == self.SEQ_END)]
+                np.append(from_indices, end_states)
+                np.append(to_indices, [0] * begin_states.shape[0])
+
+                # put the results into the first cell just as a placeholder
+                joint_logp[0] += np.log(trans_p[group_idx][self.states[from_indices], self.states[to_indices]]).sum()
 
             # then emission probs
             for var_set_idx in xrange(len(self.obs_vars)):
@@ -508,7 +523,6 @@ class GaussianHMMSampler(HMMSampler):
         
         return self.gpu_time, self.total_time
 
-    
     def _save_sample(self, iteration):
         """Save the means and covariance matrices from the current iteration.
         """
@@ -517,7 +531,7 @@ class GaussianHMMSampler(HMMSampler):
             row += list(np.hstack(self.means[state-1]))
             row += list(np.hstack([np.ravel(_) for _ in self.covs[state-1]]))
             for group_idx in xrange(self.num_groups):
-                row += [self.trans_p_matrices[group_idx][0, state], self.trans_p_matrices[state, 0]]
+                row += [self.trans_p_matrices[group_idx][0, state], self.trans_p_matrices[group_idx][state, 0]]
                 row += list(np.ravel(self.trans_p_matrices[group_idx][state, 1:]))
             row += list((self.states == state).astype(np.bool).astype(np.int0))
             self.sample_fp.write(','.join([str(_) for _ in row]) + '\n')
@@ -526,6 +540,6 @@ class GaussianHMMSampler(HMMSampler):
 
 if __name__ == '__main__':
     hs = GaussianHMMSampler(num_states = 2, sample_size = 2000, search = False, cl_mode=False, debug_mumble = True)
-    hs.read_csv('./toydata/speed.csv.gz', obs_vars = ['rt'], seq_id='corr')
+    hs.read_csv('./toydata/speed.csv.gz', obs_vars = ['rt'], group='corr')
     gt, tt = hs.do_inference()
     print(gt, tt)
