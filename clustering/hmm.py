@@ -439,7 +439,7 @@ class GaussianHMMSampler(HMMSampler):
 
         else:
             gpu_time = time()
-            joint_logp = np.empty(self.N)
+            joint_logp = np.zeros(self.N)
 
             joint_logp[0] = 0
             # calculate transition probabilities first
@@ -459,7 +459,7 @@ class GaussianHMMSampler(HMMSampler):
 
                 # put the results into the first cell just as a placeholder
                 joint_logp[0] += np.log(trans_p[group_idx][self.states[from_indices], self.states[to_indices]]).sum()
-
+                
             # then emission probs
             for var_set_idx in xrange(len(self.obs_vars)):
                 var_set = self.obs_vars[var_set_idx]
