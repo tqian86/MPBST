@@ -58,7 +58,7 @@ import sys, os.path, gzip
 
 import MPBST
 from MPBST import *
-import itertools, pprint
+import itertools
 import numpy as np
 from scipy.stats import multivariate_normal
 from collections import Counter
