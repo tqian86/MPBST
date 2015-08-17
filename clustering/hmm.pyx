@@ -240,7 +240,7 @@ class HMMSampler(BaseSampler):
         cdef np.ndarray[np.int_t, ndim=1] to_indices, from_indices
         cdef np.ndarray[np.int_t, ndim=1] group_idx_mask = self.group_idx_mask, boundary_mask = self.boundary_mask
         cdef int pair_idx, num_pairs
-        cdef int count_from_state = 0
+        cdef int count_from_state
         
         for group_idx in xrange(num_groups):
             
@@ -266,6 +266,7 @@ class HMMSampler(BaseSampler):
             
             # calculate the new parameters
             for state_from in uniq_states + [0]:
+                count_from_state = 0
                 for pair_idx in xrange(num_pairs):
                     if pairs[pair_idx][0] == state_from: count_from_state += 1
                 #count_from_state = [pair[0] for pair in pairs].count(state_from)
