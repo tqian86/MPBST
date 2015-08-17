@@ -105,11 +105,6 @@ class HMMSampler(BaseSampler):
         self.num_states = num_states
         cdef np.ndarray[long, ndim=1] uniq_states = np.linspace(1, self.num_states, self.num_states).astype(np.int64)
         self.uniq_states = uniq_states
-        
-        cdef np.ndarray[np.float_t, ndim=2] trans_p_matrix
-        trans_p_matrix = np.random.random((num_states+1, num_states+1))
-        trans_p_matrix = trans_p_matrix / trans_p_matrix.sum(axis=1)
-        self.trans_p_matrix = trans_p_matrix
 
         cdef int SEQ_BEGIN, SEQ_END
         SEQ_BEGIN, SEQ_END = 1, 2
@@ -235,34 +230,47 @@ class HMMSampler(BaseSampler):
     def _infer_trans_p(self):
         """Infer the transitional probabilities between states without OpenCL.
         """
-        trans_p_matrices = [None] * len(self.trans_p_matrices)
-        trans_p_matrix_shape = self.trans_p_matrices[0].shape
-        for group_idx in xrange(self.num_groups):
+        cdef list trans_p_matrices = [None] * len(self.trans_p_matrices)
+        cdef tuple trans_p_matrix_shape = self.trans_p_matrices[0].shape
+        cdef int group_idx, state_from, state_to
+        cdef int num_groups = self.num_groups, num_states = self.num_states
+        cdef int SEQ_BEGIN = self.SEQ_BEGIN, SEQ_END = self.SEQ_END
+        cdef list uniq_states = list(self.uniq_states)
+        cdef np.ndarray[np.int_t, ndim=1] states = self.states
+        cdef np.ndarray[np.int_t, ndim=1] to_indices, from_indices
+        cdef np.ndarray[np.int_t, ndim=1] group_idx_mask = self.group_idx_mask, boundary_mask = self.boundary_mask
+        cdef int pair_idx, num_pairs
+        cdef int count_from_state = 0
+        
+        for group_idx in xrange(num_groups):
             
             # copy the current transition prob matrix; this is needed for search mode
             new_trans_p_matrix = np.empty(trans_p_matrix_shape)
             new_trans_p_matrix[:] = self.trans_p_matrices[group_idx][:]
 
             # retrieve bigram pairs belonging to this group
-            to_indices = np.where((self.group_idx_mask == group_idx) & (self.boundary_mask != self.SEQ_BEGIN))[0]
+            to_indices = np.where((group_idx_mask == group_idx) & (boundary_mask != SEQ_BEGIN))[0]
             from_indices = to_indices - 1
             
             # make bigram pairs for easier counting
-            pairs = zip(self.states[from_indices], self.states[to_indices])
+            pairs = zip(states[from_indices], states[to_indices])
 
             # add also pairs made up by boundary marks 
-            begin_states = self.states[(self.group_idx_mask == group_idx) & (self.boundary_mask == self.SEQ_BEGIN)]
+            begin_states = states[(group_idx_mask == group_idx) & (boundary_mask == SEQ_BEGIN)]
             pairs.extend(zip([0] * begin_states.shape[0], begin_states))
-            end_states = self.states[(self.group_idx_mask == group_idx) & (self.boundary_mask == self.SEQ_END)]
+            end_states = states[(group_idx_mask == group_idx) & (boundary_mask == SEQ_END)]
             pairs.extend(zip(end_states, [0] * begin_states.shape[0]))
             
             pair_count = Counter(pairs)
-
+            num_pairs = len(pairs)
+            
             # calculate the new parameters
-            for state_from in np.insert(self.uniq_states, 0, 0):
-                count_from_state = [_[0] for _ in pairs].count(state_from)
-                for state_to in np.insert(self.uniq_states, 0, 0):
-                    new_trans_p_matrix[state_from, state_to] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + self.num_states + 1)
+            for state_from in uniq_states + [0]:
+                for pair_idx in xrange(num_pairs):
+                    if pairs[pair_idx][0] == state_from: count_from_state += 1
+                #count_from_state = [pair[0] for pair in pairs].count(state_from)
+                for state_to in uniq_states + [0]:
+                    new_trans_p_matrix[state_from, state_to] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + num_states + 1)
 
             new_trans_p_matrix[0, 0] = 0
             new_trans_p_matrix[0] = new_trans_p_matrix[0] / new_trans_p_matrix[0].sum()
@@ -362,52 +370,34 @@ class GaussianHMMSampler(HMMSampler):
         cdef np.ndarray[np.float_t, ndim=1] state_logp = np.empty(num_states)
         cdef list trans_p_matrices = self.trans_p_matrices
         cdef long is_beginning, is_end
-
-        # TODO: it might be worth writing things into loops as the commented out code below
-        for nth in xrange(self.N):
+        cdef int group_idx, next_group_idx
+        cdef np.ndarray[np.float_t, ndim=2] trans_p_matrix, next_trans_p_matrix
+        
+        for nth in xrange(N):
             nth_boundary_mask = boundary_mask[nth]
             group_idx = self.group_idx_mask[nth]
-            cdef np.ndarray[np.float_t, ndim=2] trans_p_matrix = trans_p_matrices[group_idx]
-            
-            if nth_boundary_mask == SEQ_BEGIN:
-                trans_prev_logp = np.log(trans_p_matrix[0, 1:])
-            else:
-                trans_prev_logp = np.log(trans_p_matrix[new_states[nth - 1], 1:])
+            trans_p_matrix = trans_p_matrices[group_idx]
 
-            if nth_boundary_mask == SEQ_END:
-                trans_next_logp = np.log(trans_p_matrix[1:, 0])
-            else:
-                next_group_idx = self.group_idx_mask[nth + 1]
-                trans_next_logp = np.log(trans_p_matrices[next_group_idx][1:, new_states[nth + 1]])
+            for state_idx in xrange(num_states):
+                state = uniq_states[state_idx]
+                if nth_boundary_mask == SEQ_BEGIN:
+                    state_logp[state_idx] = log(trans_p_matrix[0, state])
+                else:
+                    state_logp[state_idx] = log(trans_p_matrix[new_states[nth - 1], state])
 
-            state_logp[nth] = trans_prev_logp + trans_next_logp
+                if nth_boundary_mask == SEQ_END:
+                    state_logp[state_idx] += log(trans_p_matrix[state, 0])
+                else:
+                    next_group_idx = self.group_idx_mask[nth + 1]
+                    next_trans_p_matrix = trans_p_matrices[next_group_idx]
+                    state_logp[state_idx] += log(next_trans_p_matrix[state, new_states[nth + 1]])
 
             # resample state
             new_states[nth] = sample(a = uniq_states,
-                                     p = lognormalize(x = state_logp[nth] + emit_logp[nth], temp = self.annealing_temp))
-
-        #for nth in xrange(N):
-        #    nth_boundary_mask = boundary_mask[nth]
-
-        #    for state_idx in xrange(num_states):
-        #        state = uniq_states[state_idx]
-        #        if nth_boundary_mask == SEQ_BEGIN:
-        #            state_logp[state_idx] = log(trans_p_matrix[0, state])
-        #        else:
-        #            state_logp[state_idx] = log(trans_p_matrix[new_states[nth - 1], state])
-
-        #        if nth_boundary_mask == SEQ_END:
-        #            state_logp[state_idx] += log(trans_p_matrix[state, 0])
-        #        else:
-        #            state_logp[state_idx] += log(trans_p_matrix[state, new_states[nth + 1]])
-
-        #    # resample state
-        #    new_states[nth] = sample(a = uniq_states,
-        #                             p = lognormalize(x = state_logp + emit_logp[nth], temp = self.annealing_temp))
+                                     p = lognormalize(x = state_logp + emit_logp[nth], temp = self.annealing_temp))
 
         return new_states
 
-    # TODO: anything below this line has not been yet converted to MTM
     @cython.boundscheck(False)
     def _infer_means_covs(self):
         """Infer the means of each hidden state without OpenCL.
@@ -471,12 +461,15 @@ class GaussianHMMSampler(HMMSampler):
     def _logprob(self, sample):
         """Calculate the log probability of model and data.
         """
-        cdef np.ndarray[np.float_t, ndim = 2] trans_p
+        cdef list trans_p
         cdef np.ndarray joint_logp
         cdef np.ndarray[np.int_t, ndim = 1] states
         cdef list means, covs
-        cdef long var_set_idx, i, state
+        cdef int var_set_idx, i, state, group_idx
+        cdef int num_groups = self.num_groups
         cdef float gpu_begin_time
+        cdef int SEQ_BEGIN = self.SEQ_BEGIN, SEQ_END = self.SEQ_END
+        cdef np.ndarray[np.int_t, ndim=1] begin_states, end_states, from_indices, to_indices
         
         means, covs, trans_p, states = sample
 
@@ -510,11 +503,26 @@ class GaussianHMMSampler(HMMSampler):
             self.gpu_time += time() - gpu_begin_time
 
         else:
-            joint_logp = np.empty(self.N, dtype=np.float32)
-            
+            joint_logp = np.zeros(self.N, dtype=np.float32)
+
+            joint_logp[0] = 0
             # calculate transition probabilities first
-            joint_logp[0] = np.log(trans_p[0, states[0]])
-            joint_logp[1:] = np.log(trans_p[states[:self.N-1], states[1:]])
+            for group_idx in xrange(num_groups):
+            
+                # retrieve bigram pairs belonging to this group
+                to_indices = np.where((self.group_idx_mask == group_idx) & (self.boundary_mask != SEQ_BEGIN))[0]
+                from_indices = to_indices - 1
+
+                # add also pairs made up by boundary marks 
+                begin_states = states[(self.group_idx_mask == group_idx) & (self.boundary_mask == SEQ_BEGIN)]
+                from_indices = np.append(from_indices, [0] * begin_states.shape[0]).astype(np.int)
+                to_indices = np.append(to_indices, begin_states).astype(np.int)
+                end_states = states[(self.group_idx_mask == group_idx) & (self.boundary_mask == SEQ_END)]
+                from_indices = np.append(from_indices, end_states).astype(np.int)
+                to_indices = np.append(to_indices, [0] * begin_states.shape[0]).astype(np.int)
+
+                # put the results into the first cell just as a placeholder
+                joint_logp[0] += np.log(trans_p[group_idx][states[from_indices], states[to_indices]]).sum()
 
             # then emission probs
             for var_set_idx in xrange(self.num_var_set):
@@ -545,8 +553,10 @@ class GaussianHMMSampler(HMMSampler):
         # temporary measure - list singletons
         obs_vars = [[_] if type(_) is str else _ for _ in self.obs_vars]
         header += ['cov_{0}_{1}'.format(*_) for _ in itertools.chain(*[itertools.product(*[_] * 2) for _ in obs_vars])]
-        header += ['trans_p_from_bd', 'trans_p_to_bd']
-        header += ['trans_p_to_{0:d}'.format(_) for _ in self.uniq_states]
+        for group_idx in xrange(self.num_groups):
+            gl = self.group_labels[group_idx]
+            header += ['trans_p_from_bd_{0}'.format(gl), 'trans_p_to_bd_{0}'.format(gl)]
+            header += ['trans_p_to_{0:d}_{1}'.format(_, gl) for _ in self.uniq_states]
         header += ['has_obs_{0:d}'.format(_) for _ in range(1, self.N + 1)]
         self.sample_fp.write(','.join(header) + '\n')
         
@@ -568,9 +578,9 @@ class GaussianHMMSampler(HMMSampler):
                     self.loglik = self.best_sample[1]
                     self._save_sample(iteration = i)
                 if self.no_improvement(): break
-                self.means, self.covs, self.trans_p_matrix, self.states = new_means, new_covs, new_trans_p, new_states
+                self.means, self.covs, self.trans_p_matrices, self.states = new_means, new_covs, new_trans_p, new_states
             else:
-                self.means, self.covs, self.trans_p_matrix, self.states = new_means, new_covs, new_trans_p, new_states
+                self.means, self.covs, self.trans_p_matrices, self.states = new_means, new_covs, new_trans_p, new_states
                 self.loglik = self._logprob((new_means, new_covs, new_trans_p, new_states))
                 self._save_sample(iteration = i)
 
@@ -584,22 +594,23 @@ class GaussianHMMSampler(HMMSampler):
         """Save the means and covariance matrices from the current iteration.
         """
         cdef np.ndarray[np.int_t, ndim=1] uniq_states = self.uniq_states
-        cdef np.ndarray[np.float_t, ndim=2] trans_p_matrix = self.trans_p_matrix
+        cdef list trans_p_matrices = self.trans_p_matrices
         cdef np.ndarray[np.float_t, ndim=2] cov
-        cdef int num_states = self.num_states
+        cdef int num_states = self.num_states, num_groups = self.num_groups
         cdef int state, state_idx
         cdef double loglik = self.loglik
         cdef int num_var = self.num_var
         cdef list row, covs = self.covs, means = self.means
         for state_idx in xrange(num_states):
             state = uniq_states[state_idx]
+
             row = [iteration, loglik, num_var, state]
             row += list(np.hstack(means[state-1]))
             row += list(np.hstack([np.ravel(cov) for cov in covs[state-1]]))
-            row += [trans_p_matrix[0, state], trans_p_matrix[state, 0]]
-            row += list(np.ravel(trans_p_matrix[state, 1:]))
+            for group_idx in xrange(num_groups):
+                row += [trans_p_matrices[group_idx][0, state], trans_p_matrices[group_idx][state, 0]]
+                row += list(np.ravel(trans_p_matrices[group_idx][state, 1:]))
             row += list((self.states == state).astype(np.bool).astype(np.int0))
-
             self.sample_fp.write(','.join([str(_) for _ in row]) + '\n')
                 
         return
