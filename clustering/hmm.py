@@ -451,11 +451,11 @@ class GaussianHMMSampler(HMMSampler):
 
                 # add also pairs made up by boundary marks 
                 begin_states = self.states[(self.group_idx_mask == group_idx) & (self.boundary_mask == self.SEQ_BEGIN)]
-                np.append(from_indices, [0] * begin_states.shape[0])
-                np.append(to_indices, begin_states)
+                from_indices = np.append(from_indices, [0] * begin_states.shape[0])
+                to_indices = np.append(to_indices, begin_states)
                 end_states = self.states[(self.group_idx_mask == group_idx) & (self.boundary_mask == self.SEQ_END)]
-                np.append(from_indices, end_states)
-                np.append(to_indices, [0] * begin_states.shape[0])
+                from_indices = np.append(from_indices, end_states)
+                to_indices = np.append(to_indices, [0] * begin_states.shape[0])
 
                 # put the results into the first cell just as a placeholder
                 joint_logp[0] += np.log(trans_p[group_idx][self.states[from_indices], self.states[to_indices]]).sum()
