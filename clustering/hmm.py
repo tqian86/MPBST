@@ -450,15 +450,15 @@ class GaussianHMMSampler(HMMSampler):
                 from_indices = to_indices - 1
 
                 # add also pairs made up by boundary marks 
-                begin_states = self.states[(self.group_idx_mask == group_idx) & (self.boundary_mask == self.SEQ_BEGIN)]
+                begin_states = states[(self.group_idx_mask == group_idx) & (self.boundary_mask == self.SEQ_BEGIN)]
                 from_indices = np.append(from_indices, [0] * begin_states.shape[0])
                 to_indices = np.append(to_indices, begin_states)
-                end_states = self.states[(self.group_idx_mask == group_idx) & (self.boundary_mask == self.SEQ_END)]
+                end_states = states[(self.group_idx_mask == group_idx) & (self.boundary_mask == self.SEQ_END)]
                 from_indices = np.append(from_indices, end_states)
                 to_indices = np.append(to_indices, [0] * begin_states.shape[0])
 
                 # put the results into the first cell just as a placeholder
-                joint_logp[0] += np.log(trans_p[group_idx][self.states[from_indices], self.states[to_indices]]).sum()
+                joint_logp[0] += np.log(trans_p[group_idx][states[from_indices], states[to_indices]]).sum()
                 
             # then emission probs
             for var_set_idx in xrange(len(self.obs_vars)):
