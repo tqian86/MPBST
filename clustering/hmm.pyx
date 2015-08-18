@@ -259,7 +259,7 @@ class HMMSampler(BaseSampler):
             begin_states = states[(group_idx_mask == group_idx) & (boundary_mask == SEQ_BEGIN)]
             pairs.extend(zip([0] * begin_states.shape[0], begin_states))
             end_states = states[(group_idx_mask == group_idx) & (boundary_mask == SEQ_END)]
-            pairs.extend(zip(end_states, [0] * begin_states.shape[0]))
+            pairs.extend(zip(end_states, [0] * end_states.shape[0]))
             
             pair_count = Counter(pairs)
             num_pairs = len(pairs)
@@ -520,7 +520,7 @@ class GaussianHMMSampler(HMMSampler):
                 to_indices = np.append(to_indices, begin_states).astype(np.int)
                 end_states = states[(self.group_idx_mask == group_idx) & (self.boundary_mask == SEQ_END)]
                 from_indices = np.append(from_indices, end_states).astype(np.int)
-                to_indices = np.append(to_indices, [0] * begin_states.shape[0]).astype(np.int)
+                to_indices = np.append(to_indices, [0] * end_states.shape[0]).astype(np.int)
 
                 # put the results into the first cell just as a placeholder
                 joint_logp[0] += np.log(trans_p[group_idx][states[from_indices], states[to_indices]]).sum()
