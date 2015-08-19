@@ -1,5 +1,5 @@
-*.csv
-*.csv.gz
+*samples*.csv
+*samples*.csv.gz
 *~
 # Byte-compiled / optimized / DLL files
 __pycache__/
