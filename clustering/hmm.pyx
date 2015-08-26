@@ -207,10 +207,10 @@ class HMMSampler(BaseSampler):
             boundary_mask[-1] = self.SEQ_END
             self.boundary_mask = boundary_mask
         else:
-            self.original_data.sort(columns = [group, timestamp], inplace=True)
+            self.original_data.sort(columns = [seq_id, timestamp], inplace=True)
             self.data = self.original_data[obs_vars]
             boundary_mask = np.zeros(self.N, dtype=np.int)
-            rle_values, rle_lengths = zip(*[(k, len(list(g))) for k, g in itertools.groupby(self.original_data[group])])
+            rle_values, rle_lengths = zip(*[(k, len(list(g))) for k, g in itertools.groupby(self.original_data[seq_id])])
             boundary_begins = np.array(rle_lengths).cumsum() - rle_lengths
             boundary_ends = np.array(rle_lengths).cumsum() - 1
             boundary_mask[boundary_begins] = self.SEQ_BEGIN
