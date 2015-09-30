@@ -468,7 +468,7 @@ class GaussianHMMSampler(HMMSampler):
         cdef list means, covs
         cdef int var_set_idx, i, state, group_idx
         cdef int num_groups = self.num_groups
-        cdef float gpu_begin_time
+        cdef float gpu_begin_time, logprob_model
         cdef int SEQ_BEGIN = self.SEQ_BEGIN, SEQ_END = self.SEQ_END
         cdef np.ndarray[np.int_t, ndim=1] begin_states, end_states, from_indices, to_indices
         
@@ -505,8 +505,8 @@ class GaussianHMMSampler(HMMSampler):
 
         else:
             joint_logp = np.zeros(self.N, dtype=np.float32)
+            logprob_model = 0
 
-            joint_logp[0] = 0
             # calculate transition probabilities first
             for group_idx in xrange(num_groups):
             
@@ -523,7 +523,7 @@ class GaussianHMMSampler(HMMSampler):
                 to_indices = np.append(to_indices, [0] * end_states.shape[0]).astype(np.int)
 
                 # put the results into the first cell just as a placeholder
-                joint_logp[0] += np.log(trans_p[group_idx][states[from_indices], states[to_indices]]).sum()
+                logprob_model += np.log(trans_p[group_idx][states[from_indices], states[to_indices]]).sum()
 
             # then emission probs
             for var_set_idx in xrange(self.num_var_set):
@@ -534,7 +534,7 @@ class GaussianHMMSampler(HMMSampler):
                     joint_logp[indices] += multivariate_normal.logpdf(obs_set,
                                                                       mean = means[state-1][var_set_idx],
                                                                       cov = covs[state-1][var_set_idx])
-        return joint_logp.sum()
+        return logprob_model, joint_logp.sum()
 
     def do_inference(self, str output_folder = None):
         """Perform inference on parameters.
@@ -549,7 +549,7 @@ class GaussianHMMSampler(HMMSampler):
 
         # set up output samples file and write the header
         self.sample_fp = gzip.open(self.sample_fn, 'w')
-        header = ['iteration', 'loglik', 'dimension', 'state'] + ['mu_{0}'.format(_) for _ in self.flat_obs_vars]
+        header = ['iteration', 'logprob_model', 'loglik_data', 'dimension', 'state'] + ['mu_{0}'.format(_) for _ in self.flat_obs_vars]
 
         # temporary measure - list singletons
         obs_vars = [[_] if type(_) is str else _ for _ in self.obs_vars]
@@ -575,14 +575,13 @@ class GaussianHMMSampler(HMMSampler):
                 new_trans_p = self._infer_trans_p()
 
             if self.search:
-                if self.auto_save_sample((new_means, new_covs, new_trans_p, new_states)):
-                    self.loglik = self.best_sample[1]
+                if self.better_sample((new_means, new_covs, new_trans_p, new_states)):
                     self._save_sample(iteration = i)
                 if self.no_improvement(): break
                 self.means, self.covs, self.trans_p_matrices, self.states = new_means, new_covs, new_trans_p, new_states
             else:
                 self.means, self.covs, self.trans_p_matrices, self.states = new_means, new_covs, new_trans_p, new_states
-                self.loglik = self._logprob((new_means, new_covs, new_trans_p, new_states))
+                self.logprob_model, self.loglik_data = self._logprob((new_means, new_covs, new_trans_p, new_states))
                 self._save_sample(iteration = i)
 
         self.total_time += time() - begin_time
@@ -599,13 +598,13 @@ class GaussianHMMSampler(HMMSampler):
         cdef np.ndarray[np.float_t, ndim=2] cov
         cdef int num_states = self.num_states, num_groups = self.num_groups
         cdef int state, state_idx
-        cdef double loglik = self.loglik
+        #cdef double loglik = self.loglik
         cdef int num_var = self.num_var
         cdef list row, covs = self.covs, means = self.means
         for state_idx in xrange(num_states):
             state = uniq_states[state_idx]
 
-            row = [iteration, loglik, num_var, state]
+            row = [iteration, self.logprob_model, self.loglik_data, num_var, state]
             row += list(np.hstack(means[state-1]))
             row += list(np.hstack([np.ravel(cov) for cov in covs[state-1]]))
             for group_idx in xrange(num_groups):
