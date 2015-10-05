@@ -467,16 +467,19 @@ class GaussianHMMSampler(HMMSampler):
                 to_indices = np.where((self.cluster_mask == cluster) & (self.boundary_mask != self.SEQ_BEGIN))[0]
                 from_indices = to_indices - 1
 
+                to_states = states[to_indices]
+                from_states = states[from_indices]
+                
                 # add also pairs made up by boundary marks 
                 begin_states = states[(self.cluster_mask == cluster) & (self.boundary_mask == self.SEQ_BEGIN)]
-                from_indices = np.append(from_indices, [0] * begin_states.shape[0]).astype(np.int)
-                to_indices = np.append(to_indices, begin_states).astype(np.int)
+                from_states = np.append(from_states, [0] * begin_states.shape[0]).astype(np.int)
+                to_states = np.append(to_states, begin_states).astype(np.int)
                 end_states = states[(self.cluster_mask == cluster) & (self.boundary_mask == self.SEQ_END)]
-                from_indices = np.append(from_indices, end_states).astype(np.int)
-                to_indices = np.append(to_indices, [0] * end_states.shape[0]).astype(np.int)
+                from_states = np.append(from_states, end_states).astype(np.int)
+                to_states = np.append(to_states, [0] * end_states.shape[0]).astype(np.int)
 
-                # put the results into the first cell just as a placeholder
-                logprob_model += np.log(trans_p[cluster][states[from_indices], states[to_indices]]).sum()
+                # put the result as logprob_model
+                logprob_model += np.log(trans_p[cluster][from_states, to_states]).sum()                
                 
             # then emission probs
             for var_set_idx in xrange(len(self.obs_vars)):
