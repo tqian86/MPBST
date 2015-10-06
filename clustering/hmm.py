@@ -63,6 +63,7 @@ import numpy as np
 from scipy.stats import multivariate_normal
 from collections import Counter
 from time import time
+from math import lgamma
 
 def multivariate_t(mu, Sigma, df, size=None):
     '''
@@ -498,8 +499,11 @@ class GaussianHMMSampler(HMMSampler):
             logprob_model = 0
             joint_logp = np.zeros(self.N)
 
-            # calculate transition probabilities first
+            # calculate the probability of the clustering arrangement
+            logprob_model += lgamma(self.num_clusters * 1) - lgamma(self.num_groups + self.num_clusters * 1)
             for cluster in xrange(self.num_clusters):
+                n = len([cluster for gl, c in self.group_cluster_dict.items() if c == cluster])
+                logprob_model += lgamma(n + 1) - lgamma(1)
             
             # calculate transition probabilities first
             for cluster in xrange(self.num_clusters):
