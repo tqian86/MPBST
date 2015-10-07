@@ -558,8 +558,10 @@ class GaussianHMMSampler(HMMSampler):
         obs_vars = [[_] if type(_) is str else _ for _ in self.obs_vars]
         header += ['cov_{0}_{1}'.format(*_) for _ in itertools.chain(*[itertools.product(*[_] * 2) for _ in obs_vars])]
         for cluster in xrange(self.num_clusters):
-            header += ['trans_p_from_bd_{0}'.format(cluster), 'trans_p_to_bd_{0}'.format(cluster)]
-            header += ['trans_p_to_{0:d}_{1}'.format(_, cluster) for _ in self.uniq_states]
+            header += ['tp_from_bd_{0}'.format(cluster), 'tp_to_bd_{0}'.format(cluster)]
+            header += ['tp_to_{0:d}_{1}'.format(_, cluster) for _ in self.uniq_states]
+        for group_label in self.group_label_set:
+            header += ['{0}_cluster'.format(group_label)]
         header += ['has_obs_{0:d}'.format(_) for _ in range(1, self.N + 1)]
         self.sample_fp.write(','.join(header) + '\n')
         
@@ -599,15 +601,17 @@ class GaussianHMMSampler(HMMSampler):
         """Save the means and covariance matrices from the current iteration.
         """
         for state in self.uniq_states:
-            row = [iteration, self.logprob_model, self.loglik_data, self.num_var, state]
-            row += list(np.hstack(self.means[state-1]))
-            row += list(np.hstack([np.ravel(_) for _ in self.covs[state-1]]))
+            row = [iteration, round(self.logprob_model, 3), round(self.loglik_data, 3), self.num_var, state]
+            row += list(np.hstack(np.round(self.means[state-1], 3)))
+            row += list(np.hstack([np.ravel(_) for _ in np.round(self.covs[state-1], 3)]))
             for cluster in xrange(self.num_clusters):
-                row += [self.trans_p_matrices[cluster][0, state], self.trans_p_matrices[cluster][state, 0]]
-                row += list(np.ravel(self.trans_p_matrices[cluster][state, 1:]))
+                row += [round(self.trans_p_matrices[cluster][0, state], 3), round(self.trans_p_matrices[cluster][state, 0], 3)]
+                row += list(np.ravel(np.round(self.trans_p_matrices[cluster][state, 1:], 3)))
+            for group_label in self.group_label_set:
+                row += [self.group_cluster_dict[group_label]]
             row += list((self.states == state).astype(np.bool).astype(np.int0))
             self.sample_fp.write(','.join([str(_) for _ in row]) + '\n')
-                
+            
         return
 
 if __name__ == '__main__':
