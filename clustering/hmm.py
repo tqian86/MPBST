@@ -105,8 +105,6 @@ class HMMSampler(BaseSampler):
         self.data = None
         self.num_states = num_states
         self.uniq_states = np.linspace(1, self.num_states, self.num_states).astype(np.int64)
-        #self.trans_p_matrix = np.random.random((num_states+1, num_states+1))
-        #self.trans_p_matrix = self.trans_p_matrix / self.trans_p_matrix.sum(axis=1)
         self.SEQ_BEGIN, self.SEQ_END = 1, 2
         self.str_output_lines = []
         
@@ -211,6 +209,12 @@ class HMMSampler(BaseSampler):
             self.boundary_mask[0] = self.SEQ_BEGIN
             self.boundary_mask[-1] = self.SEQ_END
         else:
+            if seq_id not in self.original_data:
+                print('The specified sequence ID "{0}" cannot be found in the data'.format(seq_id), file = sys.stderr)
+                sys.exit(0)
+            if timestamp not in self.original_data:
+                print('The specified timestamp "{0}" cannot be found in the data'.format(timestamp), file = sys.stderr)
+                sys.exit(0)
             self.original_data.sort(columns = [seq_id, timestamp], inplace=True)
             self.data = self.original_data[obs_vars]
             self.boundary_mask = np.zeros(self.N, dtype=np.int32)
@@ -319,7 +323,7 @@ class GaussianHMMSampler(HMMSampler):
     def _infer_cluster(self, states, trans_p_matrices):
         """Infer the clusters of each group.
         """
-        if self.num_clusters == 1: return
+        if self.num_clusters == 1: return self.group_cluster_dict, self.cluster_mask
         group_cluster_dict = {}
         cluster_mask = np.empty(self.N, dtype=np.int)
         
