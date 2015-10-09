@@ -63,7 +63,7 @@ import numpy as np; cimport numpy as np
 from scipy.stats import multivariate_normal
 from collections import Counter
 from time import time
-from libc.math cimport exp, log, pow
+from libc.math cimport exp, log, pow, lgamma
 
 def multivariate_t(np.ndarray mu, np.ndarray Sigma, int df, size=None):
     '''
@@ -112,7 +112,7 @@ class HMMSampler(BaseSampler):
         
         self.str_output_lines = []
         
-    def read_csv(self, str filepath, list obs_vars = ['obs'], str seq_id = None, str timestamp = None, str group = None, header = True):
+    def read_csv(self, str filepath, list obs_vars = ['obs'], str seq_id = None, str timestamp = None, str group = None, int num_clusters = 1, header = True):
         """Read data from a csv file and check for observations. 
 
         Time series data are expected to be stored in columns, rather than rows of various lengths.
@@ -184,17 +184,26 @@ class HMMSampler(BaseSampler):
             
         # create multiple transition matrices if group is supplied
         if group is None:
-            self.group_labels = ['__all__']; self.num_groups = 1
-            self.group_idx_mask = np.zeros(self.N, dtype=np.int)
+            self.num_clusters = 1
+            self.group_labels = [0] * self.N
         else:
-            self.group_labels = np.unique(self.original_data[group])
-            self.num_groups = self.group_labels.shape[0]
-            self.group_idx_mask = np.empty(self.N, dtype=np.int)
-            for group_idx in xrange(self.num_groups):
-                group_label = self.group_labels[group_idx]
-                self.group_idx_mask[np.where(self.original_data[group] == group_label)] = group_idx
+            self.group_labels = self.original_data[group].values
+            self.num_clusters = num_clusters
             
+        # we have the same number of trans matrices as the number of clusters
         self.trans_p_matrices = [_make_trans_p_matrix(self.num_states) for _ in xrange(self.num_groups)]
+
+        # get unique group labels and the number of groups
+        self.group_label_set = np.unique(self.group_labels)
+        self.num_groups = self.group_label_set.shape[0]
+        
+        # assign each group into a cluster randomly
+        clusters = np.random.randint(0, self.num_clusters, size = self.num_groups)
+        self.group_cluster_dict = dict(zip(self.group_label_set, clusters))
+        # make a mask array that indicates the cluster membership of each *data point*
+        self.cluster_mask = np.empty(self.N, dtype=np.int)
+        for group_label in self.group_label_set:
+            self.cluster_mask[(self.group_labels == group_label)] = self.group_cluster_dict[group_label]
 
         # define boundary mask
         cdef np.ndarray[np.int_t, ndim = 1] boundary_mask
@@ -205,7 +214,6 @@ class HMMSampler(BaseSampler):
             boundary_mask = np.zeros(self.N, dtype=np.int)
             boundary_mask[0] = self.SEQ_BEGIN
             boundary_mask[-1] = self.SEQ_END
-            self.boundary_mask = boundary_mask
         else:
             self.original_data.sort(columns = [seq_id, timestamp], inplace=True)
             self.data = self.original_data[obs_vars]
@@ -215,7 +223,8 @@ class HMMSampler(BaseSampler):
             boundary_ends = np.array(rle_lengths).cumsum() - 1
             boundary_mask[boundary_begins] = self.SEQ_BEGIN
             boundary_mask[boundary_ends] = self.SEQ_END
-            self.boundary_mask = boundary_mask
+            
+        self.boundary_mask = boundary_mask
 
         # define states
         cdef np.ndarray[np.int_t, ndim = 1] states
@@ -232,21 +241,21 @@ class HMMSampler(BaseSampler):
         """
         cdef list trans_p_matrices = [None] * len(self.trans_p_matrices)
         cdef tuple trans_p_matrix_shape = self.trans_p_matrices[0].shape
-        cdef int group_idx, state_from, state_to
-        cdef int num_groups = self.num_groups, num_states = self.num_states
+        cdef np.ndarray[np.float_t, ndim=2] new_trans_p_matrix
+        cdef int cluster, state_from, state_to
+        cdef int num_clusters = self.num_clusters, num_states = self.num_states
         cdef int SEQ_BEGIN = self.SEQ_BEGIN, SEQ_END = self.SEQ_END
         cdef list uniq_states = list(self.uniq_states)
         cdef np.ndarray[np.int_t, ndim=1] states = self.states
         cdef np.ndarray[np.int_t, ndim=1] to_indices, from_indices
-        cdef np.ndarray[np.int_t, ndim=1] group_idx_mask = self.group_idx_mask, boundary_mask = self.boundary_mask
-        cdef int pair_idx, num_pairs
-        cdef int count_from_state
+        cdef np.ndarray[np.int_t, ndim=1] cluster_mask = self.cluster_mask, boundary_mask = self.boundary_mask
+        cdef int pair_idx, num_pairs, count_from_state
         
-        for group_idx in xrange(num_groups):
+        for cluster in xrange(num_clusters):
             
             # copy the current transition prob matrix; this is needed for search mode
             new_trans_p_matrix = np.empty(trans_p_matrix_shape)
-            new_trans_p_matrix[:] = self.trans_p_matrices[group_idx][:]
+            new_trans_p_matrix[:] = self.trans_p_matrices[cluster][:]
 
             # retrieve bigram pairs belonging to this group
             to_indices = np.where((group_idx_mask == group_idx) & (boundary_mask != SEQ_BEGIN))[0]
@@ -256,9 +265,9 @@ class HMMSampler(BaseSampler):
             pairs = zip(states[from_indices], states[to_indices])
 
             # add also pairs made up by boundary marks 
-            begin_states = states[(group_idx_mask == group_idx) & (boundary_mask == SEQ_BEGIN)]
+            begin_states = states[(cluster_mask == cluster) & (boundary_mask == SEQ_BEGIN)]
             pairs.extend(zip([0] * begin_states.shape[0], begin_states))
-            end_states = states[(group_idx_mask == group_idx) & (boundary_mask == SEQ_END)]
+            end_states = states[(cluster_mask == cluster) & (boundary_mask == SEQ_END)]
             pairs.extend(zip(end_states, [0] * end_states.shape[0]))
             
             pair_count = Counter(pairs)
@@ -269,14 +278,13 @@ class HMMSampler(BaseSampler):
                 count_from_state = 0
                 for pair_idx in xrange(num_pairs):
                     if pairs[pair_idx][0] == state_from: count_from_state += 1
-                #count_from_state = [pair[0] for pair in pairs].count(state_from)
                 for state_to in uniq_states + [0]:
-                    new_trans_p_matrix[state_from, state_to] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + num_states + 1)
+                    new_trans_p_matrix[state_from, state_to] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + num_states * 1)
 
             new_trans_p_matrix[0, 0] = 0
             new_trans_p_matrix[0] = new_trans_p_matrix[0] / new_trans_p_matrix[0].sum()
 
-            trans_p_matrices[group_idx] = new_trans_p_matrix
+            trans_p_matrices[cluster] = new_trans_p_matrix
 
         return trans_p_matrices
 
@@ -313,7 +321,7 @@ class GaussianHMMSampler(HMMSampler):
             program_str = open(MPBST.__path__[0] + '/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
         
-    def read_csv(self, str filepath, list obs_vars = ['obs'], str seq_id = None, str timestamp = None, str group = None, header = True):
+    def read_csv(self, str filepath, list obs_vars = ['obs'], str seq_id = None, str timestamp = None, str group = None, int num_clusters = 1, header = True):
         """Read data from a csv file and set up means and covariance matrices for the Gaussian
         generative model.
         """
@@ -321,7 +329,7 @@ class GaussianHMMSampler(HMMSampler):
         self.obs_vars = obs_vars; self.flat_obs_vars = flat_obs_vars
 
         HMMSampler.read_csv(self, filepath, obs_vars = flat_obs_vars, seq_id = seq_id,
-                            timestamp = timestamp, group = group, header = header)
+                            timestamp = timestamp, group = group, num_clusters = num_clusters, header = header)
 
         cdef long s
 
@@ -340,9 +348,9 @@ class GaussianHMMSampler(HMMSampler):
     def _infer_states(self):
         """Infer the state of each observation without OpenCL.
         """
-        cdef int num_states = self.num_states
         cdef int nth_boundary_mask
-        cdef int SEQ_BEGIN = self.SEQ_BEGIN, SEQ_END = self.SEQ_END, N = self.N
+        cdef int num_states = self.num_states, SEQ_BEGIN = self.SEQ_BEGIN, SEQ_END = self.SEQ_END, N = self.N
+        cdef np.ndarray[np.int_t, ndim=1] uniq_states = self.uniq_states, boundary_mask = self.boundary_mask
         
         # copy the states first, this is needed for search mode
         cdef np.ndarray[np.int_t, ndim=1] new_states = np.empty(self.states.shape, dtype=np.int);
@@ -350,13 +358,11 @@ class GaussianHMMSampler(HMMSampler):
         
         # set up grid for storing log probabilities
         cdef np.ndarray[np.float_t, ndim=2] emit_logp = np.empty((N, num_states))
-
-        cdef long var_set_idx, state_idx, state, nth
-        cdef long num_var_set = self.num_var_set
-        cdef np.ndarray[np.int_t, ndim=1] uniq_states = self.uniq_states
-        cdef np.ndarray[np.int_t, ndim=1] boundary_mask = self.boundary_mask
+        cdef np.ndarray[np.float_t, ndim=1] state_logp = np.empty(num_states)
 
         # emission probabilities can be calculated in one pass
+        cdef int var_set_idx, state_idx, state, nth
+        cdef int num_var_set = self.num_var_set
         for var_set_idx in xrange(num_var_set):
             var_set = self.obs_vars[var_set_idx]
             obs_set = self.data[var_set]
@@ -368,16 +374,14 @@ class GaussianHMMSampler(HMMSampler):
                                                                    cov = self.covs[state-1][var_set_idx])
        
         # state probabilities need to be interated over
-        cdef np.ndarray[np.float_t, ndim=1] state_logp = np.empty(num_states)
         cdef list trans_p_matrices = self.trans_p_matrices
-        cdef long is_beginning, is_end
-        cdef int group_idx, next_group_idx
+        cdef int is_beginning, is_end, group_idx, next_group_idx
         cdef np.ndarray[np.float_t, ndim=2] trans_p_matrix, next_trans_p_matrix
         
         for nth in xrange(N):
             nth_boundary_mask = boundary_mask[nth]
-            group_idx = self.group_idx_mask[nth]
-            trans_p_matrix = trans_p_matrices[group_idx]
+            cluster = self.cluster_mask[nth]
+            trans_p_matrix = trans_p_matrices[cluster]
 
             for state_idx in xrange(num_states):
                 state = uniq_states[state_idx]
@@ -389,9 +393,7 @@ class GaussianHMMSampler(HMMSampler):
                 if nth_boundary_mask == SEQ_END:
                     state_logp[state_idx] += log(trans_p_matrix[state, 0])
                 else:
-                    next_group_idx = self.group_idx_mask[nth + 1]
-                    next_trans_p_matrix = trans_p_matrices[next_group_idx]
-                    state_logp[state_idx] += log(next_trans_p_matrix[state, new_states[nth + 1]])
+                    state_logp[state_idx] += log(trans_p_matrix[state, new_states[nth + 1]])
 
             # resample state
             new_states[nth] = sample(a = uniq_states,
@@ -403,9 +405,9 @@ class GaussianHMMSampler(HMMSampler):
     def _infer_means_covs(self):
         """Infer the means of each hidden state without OpenCL.
         """
-        cdef long s, var_set_idx, obs_dim, state, state_idx, n, v_n, df, k_n
+        cdef int s, var_set_idx, obs_dim, state, state_idx, n, v_n, df, k_n
         cdef np.ndarray obs, cluster_obs
-        cdef long num_states = self.num_states
+        cdef int num_states = self.num_states
         
         cdef list new_means = [[np.zeros(len(_)) if type(_) is list else np.zeros(1) for _ in self.obs_vars] for s in xrange(num_states)]
         cdef list new_covs = [[np.eye(len(_)) if type(_) is list else np.eye(1) for _ in self.obs_vars] for s in xrange(num_states)]
