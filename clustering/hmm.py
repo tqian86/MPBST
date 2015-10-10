@@ -51,7 +51,6 @@ Planned models:
 - HMM with categorical emission probability distributions
 """
 
-
 from __future__ import print_function, division
 
 import sys, os.path, gzip
@@ -506,7 +505,7 @@ class GaussianHMMSampler(HMMSampler):
             # calculate the probability of the clustering arrangement
             logprob_model += lgamma(self.num_clusters * 1) - lgamma(self.num_groups + self.num_clusters * 1)
             for cluster in xrange(self.num_clusters):
-                n = len([cluster for gl, c in self.group_cluster_dict.items() if c == cluster])
+                n = len([gl for gl, c in self.group_cluster_dict.items() if c == cluster])
                 logprob_model += lgamma(n + 1) - lgamma(1)
             
             # calculate transition probabilities first
