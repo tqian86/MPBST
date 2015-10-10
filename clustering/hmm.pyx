@@ -288,6 +288,53 @@ class HMMSampler(BaseSampler):
 
         return trans_p_matrices
 
+    def _infer_cluster(self, states, trans_p_matrices):
+        """Infer the clusters of each group.
+        """
+        if self.num_clusters == 1: return self.group_cluster_dict, self.cluster_mask
+        group_cluster_dict = {}
+        cluster_mask = np.empty(self.N, dtype=np.int)
+        
+        # change the cluster of a group affects the transition probability only
+        # so we only need to calculate that
+        for group_label in self.group_label_set:
+            logp_grid = np.empty(self.num_clusters)
+            old_cluster = self.group_cluster_dict[group_label]
+            for candidate_cluster in xrange(self.num_clusters):
+
+                # get the transition prob matrix corresponding to the target cluster
+                trans_p_matrix = trans_p_matrices[candidate_cluster]
+                
+                # retrieve bigram pairs belonging to this group
+                to_indices = np.where((self.group_labels == group_label) & (self.boundary_mask != self.SEQ_BEGIN))[0]
+                from_indices = to_indices - 1
+
+                to_states = states[to_indices]
+                from_states = states[from_indices]
+                
+                begin_states = states[(self.group_labels == group_label) & (self.boundary_mask == self.SEQ_BEGIN)]
+                from_states = np.append(from_states, [0] * begin_states.shape[0]).astype(np.int)
+                to_states = np.append(to_states, begin_states).astype(np.int)
+                end_states = states[(self.group_labels == group_label) & (self.boundary_mask == self.SEQ_END)]
+                from_states = np.append(from_states, end_states).astype(np.int)
+                to_states = np.append(to_states, [0] * end_states.shape[0]).astype(np.int)
+
+                # put the results into the first cell just as a placeholder
+                logp_grid[candidate_cluster] = np.log(trans_p_matrix[from_states, to_states]).sum()
+                
+                # calculate the "prior"
+                n = len([cluster for gl, cluster in self.group_cluster_dict.items() if cluster == candidate_cluster])
+                logp_grid[candidate_cluster] += np.log((n + 1.0) / (self.num_groups + self.num_clusters))
+                
+            new_cluster = sample(a = range(self.num_clusters), p = lognormalize(logp_grid))
+
+            # record the results
+            group_cluster_dict[group_label] = new_cluster
+            cluster_mask[(self.group_labels == group_label)] = new_cluster
+
+        return group_cluster_dict, cluster_mask
+
+
 cdef np.ndarray[np.int_t, ndim=2] _gaussian_mu0(int dim):
     return np.zeros((1, dim))
 
@@ -466,13 +513,14 @@ class GaussianHMMSampler(HMMSampler):
         """
         cdef list trans_p
         cdef np.ndarray joint_logp
-        cdef np.ndarray[np.int_t, ndim = 1] states
+        cdef np.ndarray[np.int_t, ndim = 1] states, from_states, to_states
         cdef list means, covs
-        cdef int var_set_idx, i, state, group_idx
-        cdef int num_groups = self.num_groups
+        cdef int var_set_idx, i, state, cluster, n
+        cdef int num_clusters = self.num_clusters, num_groups = self.num_groups
         cdef float gpu_begin_time, logprob_model
         cdef int SEQ_BEGIN = self.SEQ_BEGIN, SEQ_END = self.SEQ_END
         cdef np.ndarray[np.int_t, ndim=1] begin_states, end_states, from_indices, to_indices
+        cdef np.ndarray[np.int_t, ndim=1] cluster_mask = self.cluster_mask, boundary_mask = self.boundary_mask
         
         means, covs, trans_p, states = sample
 
@@ -509,23 +557,32 @@ class GaussianHMMSampler(HMMSampler):
             joint_logp = np.zeros(self.N, dtype=np.float32)
             logprob_model = 0
 
+            # calculate the probability of the clustering arrangement
+            logprob_model += lgamma(num_clusters * 1) - lgamma(num_groups + num_clusters * 1)
+            for cluster in xrange(num_clusters):
+                n = len([gl for gl, c in self.group_cluster_dict.items() if c == cluster])
+                logprob_model += lgamma(n + 1) - lgamma(1)
+            
             # calculate transition probabilities first
-            for group_idx in xrange(num_groups):
+            for cluster in xrange(num_clusters):
             
                 # retrieve bigram pairs belonging to this group
-                to_indices = np.where((self.group_idx_mask == group_idx) & (self.boundary_mask != SEQ_BEGIN))[0]
+                to_indices = np.where((cluster_mask == cluster) & (boundary_mask != SEQ_BEGIN))[0]
                 from_indices = to_indices - 1
 
+                to_states = states[to_indices]
+                from_states = states[from_indices]
+
                 # add also pairs made up by boundary marks 
-                begin_states = states[(self.group_idx_mask == group_idx) & (self.boundary_mask == SEQ_BEGIN)]
-                from_indices = np.append(from_indices, [0] * begin_states.shape[0]).astype(np.int)
-                to_indices = np.append(to_indices, begin_states).astype(np.int)
-                end_states = states[(self.group_idx_mask == group_idx) & (self.boundary_mask == SEQ_END)]
-                from_indices = np.append(from_indices, end_states).astype(np.int)
-                to_indices = np.append(to_indices, [0] * end_states.shape[0]).astype(np.int)
+                begin_states = states[(cluster_mask == cluster) & (boundary_mask == SEQ_BEGIN)]
+                from_states = np.append(from_states, [0] * begin_states.shape[0]).astype(np.int)
+                to_states = np.append(to_states, begin_states).astype(np.int)
+                end_states = states[(cluster_mask == cluster) & (boundary_mask == SEQ_END)]
+                from_states = np.append(from_states, end_states).astype(np.int)
+                to_states = np.append(to_states, [0] * end_states.shape[0]).astype(np.int)
 
                 # put the results into the first cell just as a placeholder
-                logprob_model += np.log(trans_p[group_idx][states[from_indices], states[to_indices]]).sum()
+                logprob_model += np.log(trans_p[cluster][from_indices, to_indices]).sum()
 
             # then emission probs
             for var_set_idx in xrange(self.num_var_set):
@@ -542,12 +599,10 @@ class GaussianHMMSampler(HMMSampler):
         """Perform inference on parameters.
         """
         cdef list header, obs_vars
-        cdef int i
+        cdef int i, num_clusters = self.num_clusters
         
-        if output_folder is None:
-            output_folder = self.source_dirname
-        else:
-            output_folder += '/'
+        if output_folder is None:  output_folder = self.source_dirname
+        else: output_folder += '/'
 
         # set up output samples file and write the header
         self.sample_fp = gzip.open(self.sample_fn, 'w')
@@ -556,10 +611,11 @@ class GaussianHMMSampler(HMMSampler):
         # temporary measure - list singletons
         obs_vars = [[_] if type(_) is str else _ for _ in self.obs_vars]
         header += ['cov_{0}_{1}'.format(*_) for _ in itertools.chain(*[itertools.product(*[_] * 2) for _ in obs_vars])]
-        for group_idx in xrange(self.num_groups):
-            gl = self.group_labels[group_idx]
-            header += ['trans_p_from_bd_{0}'.format(gl), 'trans_p_to_bd_{0}'.format(gl)]
-            header += ['trans_p_to_{0:d}_{1}'.format(_, gl) for _ in self.uniq_states]
+        for cluster in xrange(num_clusters):
+            header += ['tp_from_bd_{0}'.format(cluster), 'tp_to_bd_{0}'.format(cluster)]
+            header += ['tp_to_{0:d}_{1}'.format(_, cluster) for _ in self.uniq_states]
+        for group_label in self.group_label_set:
+            header += ['{0}_cluster'.format(group_label)]
         header += ['has_obs_{0:d}'.format(_) for _ in range(1, self.N + 1)]
         self.sample_fp.write(','.join(header) + '\n')
         
@@ -573,21 +629,24 @@ class GaussianHMMSampler(HMMSampler):
                 new_trans_p = self._infer_trans_p()
             else:
                 new_states = self._infer_states()
-                new_means, new_covs = self._infer_means_covs()
-                new_trans_p = self._infer_trans_p()
+                new_means, new_covs = self._infer_means_covs(new_states)
+                new_trans_p = self._infer_trans_p(new_states)
+                new_group_cluster_dict, new_cluster_mask = self._infer_cluster(new_states, new_trans_p)
 
             if self.search:
-                if self.better_sample((new_means, new_covs, new_trans_p, new_states)):
+                if self.better_sample((new_means, new_covs, new_trans_p, new_states, new_group_cluster_dict, new_cluster_mask)):
                     self._save_sample(iteration = i)
                 if self.no_improvement(): break
                 self.means, self.covs, self.trans_p_matrices, self.states = new_means, new_covs, new_trans_p, new_states
+                self.group_cluster_dict, self.cluster_mask = new_group_cluster_dict, new_cluster_mask
             else:
                 self.means, self.covs, self.trans_p_matrices, self.states = new_means, new_covs, new_trans_p, new_states
-                self.logprob_model, self.loglik_data = self._logprob((new_means, new_covs, new_trans_p, new_states))
+                self.group_cluster_dict, self.cluster_mask = new_group_cluster_dict, new_cluster_mask
+                self.logprob_model, self.loglik_data = self._logprob((new_means, new_covs, new_trans_p, new_states,
+                                                                      new_group_cluster_dict, new_cluster_mask))
                 self._save_sample(iteration = i)
 
         self.total_time += time() - begin_time
-
         self.sample_fp.close()
         return self.gpu_time, self.total_time
 
@@ -598,8 +657,8 @@ class GaussianHMMSampler(HMMSampler):
         cdef np.ndarray[np.int_t, ndim=1] uniq_states = self.uniq_states
         cdef list trans_p_matrices = self.trans_p_matrices
         cdef np.ndarray[np.float_t, ndim=2] cov
-        cdef int num_states = self.num_states, num_groups = self.num_groups
-        cdef int state, state_idx
+        cdef int num_states = self.num_states, num_clusters = self.num_clusters
+        cdef int state, state_idx, cluster
         #cdef double loglik = self.loglik
         cdef int num_var = self.num_var
         cdef list row, covs = self.covs, means = self.means
@@ -609,9 +668,11 @@ class GaussianHMMSampler(HMMSampler):
             row = [iteration, self.logprob_model, self.loglik_data, num_var, state]
             row += list(np.hstack(means[state-1]))
             row += list(np.hstack([np.ravel(cov) for cov in covs[state-1]]))
-            for group_idx in xrange(num_groups):
+            for cluster in xrange(num_clusters):
                 row += [trans_p_matrices[group_idx][0, state], trans_p_matrices[group_idx][state, 0]]
                 row += list(np.ravel(trans_p_matrices[group_idx][state, 1:]))
+            for group_label in self.group_label_set:
+                row += [self.group_cluster_dict[group_label]]
             row += list((self.states == state).astype(np.bool).astype(np.int0))
             self.sample_fp.write(','.join([str(_) for _ in row]) + '\n')
                 
