@@ -112,7 +112,7 @@ class HMMSampler(BaseSampler):
         
         self.str_output_lines = []
         
-    def read_csv(self, str filepath, list obs_vars = ['obs'], str seq_id = None, str timestamp = None, str group = None, int num_clusters = 1, header = True):
+    def read_csv(self, str filepath, list obs_vars = ['obs'], seq_id = None, timestamp = None, group = None, num_clusters = 1, header = True):
         """Read data from a csv file and check for observations. 
 
         Time series data are expected to be stored in columns, rather than rows of various lengths.
@@ -367,7 +367,7 @@ class GaussianHMMSampler(HMMSampler):
             program_str = open(MPBST.__path__[0] + '/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
         
-    def read_csv(self, str filepath, list obs_vars = ['obs'], str seq_id = None, str timestamp = None, str group = None, int num_clusters = 1, header = True):
+    def read_csv(self, str filepath, list obs_vars = ['obs'], seq_id = None, timestamp = None, group = None, num_clusters = 1, header = True):
         """Read data from a csv file and set up means and covariance matrices for the Gaussian
         generative model.
         """
