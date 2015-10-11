@@ -259,7 +259,7 @@ class HMMSampler(BaseSampler):
             for state_from in np.insert(self.uniq_states, 0, 0):
                 count_from_state = [_[0] for _ in pairs].count(state_from)
                 for state_to in np.insert(self.uniq_states, 0, 0):
-                    new_trans_p_matrix[state_from, state_to] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + self.num_states + 1)
+                    new_trans_p_matrix[state_from, state_to] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + self.num_states * 1)
 
             new_trans_p_matrix[0, 0] = 0
             new_trans_p_matrix[0] = new_trans_p_matrix[0] / new_trans_p_matrix[0].sum()
@@ -505,7 +505,7 @@ class GaussianHMMSampler(HMMSampler):
             # calculate the probability of the clustering arrangement
             logprob_model += lgamma(self.num_clusters * 1) - lgamma(self.num_groups + self.num_clusters * 1)
             for cluster in xrange(self.num_clusters):
-                n = len([gl for gl, c in self.group_cluster_dict.items() if c == cluster])
+                n = len([gl for gl, c in group_cluster_dict.items() if c == cluster])
                 logprob_model += lgamma(n + 1) - lgamma(1)
             
             # calculate transition probabilities first
