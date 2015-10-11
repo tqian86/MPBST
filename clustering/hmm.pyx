@@ -278,7 +278,7 @@ class HMMSampler(BaseSampler):
                 for pair_idx in xrange(num_pairs):
                     if pairs[pair_idx][0] == state_from: count_from_state += 1
                 for state_to in uniq_states + [0]:
-                    new_trans_p_matrix[state_from, state_to] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + num_states * 1)
+                    new_trans_p_matrix[state_from, state_to] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + (1 + num_states) * 1)
 
             new_trans_p_matrix[0, 0] = 0
             new_trans_p_matrix[0] = new_trans_p_matrix[0] / new_trans_p_matrix[0].sum()
