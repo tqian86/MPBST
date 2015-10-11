@@ -191,7 +191,7 @@ class HMMSampler(BaseSampler):
             self.num_clusters = num_clusters
             
         # we have the same number of trans matrices as the number of clusters
-        self.trans_p_matrices = [_make_trans_p_matrix(self.num_states) for _ in xrange(self.num_groups)]
+        self.trans_p_matrices = [_make_trans_p_matrix(self.num_states) for _ in xrange(self.num_clusters)]
 
         # get unique group labels and the number of groups
         self.group_label_set = np.unique(self.group_labels)
@@ -236,7 +236,7 @@ class HMMSampler(BaseSampler):
                                    hostbuf = np.array(self.data, dtype=np.float32, order='C'))
 
     @cython.boundscheck(False)
-    def _infer_trans_p(self):
+    def _infer_trans_p(self, np.ndarray[np.int_t, ndim=1] states):
         """Infer the transitional probabilities between states without OpenCL.
         """
         cdef list trans_p_matrices = [None] * len(self.trans_p_matrices)
@@ -246,7 +246,6 @@ class HMMSampler(BaseSampler):
         cdef int num_clusters = self.num_clusters, num_states = self.num_states
         cdef int SEQ_BEGIN = self.SEQ_BEGIN, SEQ_END = self.SEQ_END
         cdef list uniq_states = list(self.uniq_states)
-        cdef np.ndarray[np.int_t, ndim=1] states = self.states
         cdef np.ndarray[np.int_t, ndim=1] to_indices, from_indices
         cdef np.ndarray[np.int_t, ndim=1] cluster_mask = self.cluster_mask, boundary_mask = self.boundary_mask
         cdef int pair_idx, num_pairs, count_from_state
@@ -258,7 +257,7 @@ class HMMSampler(BaseSampler):
             new_trans_p_matrix[:] = self.trans_p_matrices[cluster][:]
 
             # retrieve bigram pairs belonging to this group
-            to_indices = np.where((group_idx_mask == group_idx) & (boundary_mask != SEQ_BEGIN))[0]
+            to_indices = np.where((cluster_mask == cluster) & (boundary_mask != SEQ_BEGIN))[0]
             from_indices = to_indices - 1
             
             # make bigram pairs for easier counting
@@ -422,8 +421,8 @@ class GaussianHMMSampler(HMMSampler):
        
         # state probabilities need to be interated over
         cdef list trans_p_matrices = self.trans_p_matrices
-        cdef int is_beginning, is_end, group_idx, next_group_idx
-        cdef np.ndarray[np.float_t, ndim=2] trans_p_matrix, next_trans_p_matrix
+        cdef int is_beginning, is_end, cluster
+        cdef np.ndarray[np.float_t, ndim=2] trans_p_matrix
         
         for nth in xrange(N):
             nth_boundary_mask = boundary_mask[nth]
@@ -449,7 +448,7 @@ class GaussianHMMSampler(HMMSampler):
         return new_states
 
     @cython.boundscheck(False)
-    def _infer_means_covs(self):
+    def _infer_means_covs(self, states):
         """Infer the means of each hidden state without OpenCL.
         """
         cdef int s, var_set_idx, obs_dim, state, state_idx, n, v_n, df, k_n
@@ -469,7 +468,7 @@ class GaussianHMMSampler(HMMSampler):
                 state = self.uniq_states[state_idx]
                 
                 # get observations currently assigned to this state
-                cluster_obs = obs[np.where(self.states == state)]
+                cluster_obs = obs[np.where(states == state)]
                 n = cluster_obs.shape[0]
                 # compute sufficient statistics
                 if n == 0:
@@ -520,9 +519,9 @@ class GaussianHMMSampler(HMMSampler):
         cdef float gpu_begin_time, logprob_model
         cdef int SEQ_BEGIN = self.SEQ_BEGIN, SEQ_END = self.SEQ_END
         cdef np.ndarray[np.int_t, ndim=1] begin_states, end_states, from_indices, to_indices
-        cdef np.ndarray[np.int_t, ndim=1] cluster_mask = self.cluster_mask, boundary_mask = self.boundary_mask
+        cdef np.ndarray[np.int_t, ndim=1] cluster_mask, boundary_mask = self.boundary_mask
         
-        means, covs, trans_p, states = sample
+        means, covs, trans_p, states, group_cluster_dict, cluster_mask = sample
 
         if self.cl_mode:
             var_set_dim = np.array([len(_) if type(_) is list else 1 for _ in self.obs_vars])
@@ -560,7 +559,7 @@ class GaussianHMMSampler(HMMSampler):
             # calculate the probability of the clustering arrangement
             logprob_model += lgamma(num_clusters * 1) - lgamma(num_groups + num_clusters * 1)
             for cluster in xrange(num_clusters):
-                n = len([gl for gl, c in self.group_cluster_dict.items() if c == cluster])
+                n = len([gl for gl, c in group_cluster_dict.items() if c == cluster])
                 logprob_model += lgamma(n + 1) - lgamma(1)
             
             # calculate transition probabilities first
@@ -582,7 +581,7 @@ class GaussianHMMSampler(HMMSampler):
                 to_states = np.append(to_states, [0] * end_states.shape[0]).astype(np.int)
 
                 # put the results into the first cell just as a placeholder
-                logprob_model += np.log(trans_p[cluster][from_indices, to_indices]).sum()
+                logprob_model += np.log(trans_p[cluster][from_states, to_states]).sum()
 
             # then emission probs
             for var_set_idx in xrange(self.num_var_set):
@@ -659,18 +658,18 @@ class GaussianHMMSampler(HMMSampler):
         cdef np.ndarray[np.float_t, ndim=2] cov
         cdef int num_states = self.num_states, num_clusters = self.num_clusters
         cdef int state, state_idx, cluster
-        #cdef double loglik = self.loglik
         cdef int num_var = self.num_var
         cdef list row, covs = self.covs, means = self.means
+        
         for state_idx in xrange(num_states):
             state = uniq_states[state_idx]
 
-            row = [iteration, self.logprob_model, self.loglik_data, num_var, state]
-            row += list(np.hstack(means[state-1]))
-            row += list(np.hstack([np.ravel(cov) for cov in covs[state-1]]))
+            row = [iteration, c_round(self.logprob_model, 3), c_round(self.loglik_data, 3), num_var, state]
+            row += list(np.hstack(np.round(means[state-1], 3)))
+            row += list(np.hstack([np.ravel(cov) for cov in np.round(covs[state-1], 3)]))
             for cluster in xrange(num_clusters):
-                row += [trans_p_matrices[group_idx][0, state], trans_p_matrices[group_idx][state, 0]]
-                row += list(np.ravel(trans_p_matrices[group_idx][state, 1:]))
+                row += [c_round(trans_p_matrices[cluster][0, state], 3), c_round(trans_p_matrices[cluster][state, 0], 3)]
+                row += list(np.ravel(np.round(trans_p_matrices[cluster][state, 1:], 3)))
             for group_label in self.group_label_set:
                 row += [self.group_cluster_dict[group_label]]
             row += list((self.states == state).astype(np.bool).astype(np.int0))
