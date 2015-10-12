@@ -111,6 +111,8 @@ class HMMSampler(BaseSampler):
         self.SEQ_BEGIN, self.SEQ_END = SEQ_BEGIN, SEQ_END
         
         self.str_output_lines = []
+        self.seq_id = None
+        self.group = None
         
     def __str__(self):
         """Return a readable string representation of the sampler.
@@ -210,6 +212,7 @@ class HMMSampler(BaseSampler):
             self.num_clusters = 1
             self.group_labels = [0] * self.N
         else:
+            self.group = group
             self.group_labels = self.original_data[group].values
             self.num_clusters = num_clusters
             
@@ -238,6 +241,7 @@ class HMMSampler(BaseSampler):
             boundary_mask[0] = self.SEQ_BEGIN
             boundary_mask[-1] = self.SEQ_END
         else:
+            self.seq_id = seq_id
             self.original_data.sort(columns = [seq_id, timestamp], inplace=True)
             self.data = self.original_data[obs_vars]
             boundary_mask = np.zeros(self.N, dtype=np.int)
@@ -258,6 +262,8 @@ class HMMSampler(BaseSampler):
             self.d_obs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
                                    hostbuf = np.array(self.data, dtype=np.float32, order='C'))
 
+        self.setup_sample_output(filepath)
+            
     @cython.boundscheck(False)
     def _infer_trans_p(self, np.ndarray[np.int_t, ndim=1] states):
         """Infer the transitional probabilities between states without OpenCL.
