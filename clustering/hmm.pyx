@@ -324,39 +324,40 @@ class HMMSampler(BaseSampler):
         cdef dict group_cluster_dict = self.group_cluster_dict
         cdef dict new_group_cluster_dict = copy.deepcopy(group_cluster_dict)
         cdef np.ndarray[np.int_t, ndim=1] new_cluster_mask = copy.deepcopy(self.cluster_mask)
-        cdef np.ndarray[np.int_t, ndim=1] boundary_mask = self.boundary_mask#, from_indices, to_indices
+        cdef np.ndarray[np.int_t, ndim=1] boundary_mask = self.boundary_mask
+        cdef list from_states, to_states
 
-        cdef str group_label
         #cdef np.ndarray[np.float_t, ndim = 1] logp_grid
         cdef np.ndarray group_labels = self.group_labels
         cdef int num_clusters = self.num_clusters, num_groups = self.num_groups, SEQ_BEGIN = self.SEQ_BEGIN, SEQ_END = self.SEQ_END
         cdef int old_cluster, candidate_cluster, new_cluster, cluster, n, i
-        cdef int from_state, to_state
+        cdef int N = self.N
         cdef float temp_logp
-        
+        cdef list all_clusters = range(num_clusters)
+
+        cluster_count = Counter(new_group_cluster_dict.values())
+        logp_grid = np.empty(num_clusters)
+
+        a_time = time()    
         # change the cluster of a group affects the transition probability only
         # so we only need to calculate that
         for group_label in self.group_label_set:
-            logp_grid = np.empty(num_clusters)
             old_cluster = new_group_cluster_dict[group_label]
 
             # retrieve bigram pairs belonging to this group
-            to_indices = np.where((group_labels == group_label) & (boundary_mask != SEQ_BEGIN))[0]
-            from_indices = to_indices - 1
-
-            to_states = states[to_indices]
-            from_states = states[from_indices]
-                
-            begin_states = states[(group_labels == group_label) & (boundary_mask == SEQ_BEGIN)]
-            if len(begin_states) > 0:
-                from_states = np.append(from_states, [0] * begin_states.shape[0])
-                to_states = np.append(to_states, begin_states)
-                
-            end_states = states[(group_labels == group_label) & (boundary_mask == SEQ_END)]
-            if len(end_states) > 0:
-                from_states = np.append(from_states, end_states)
-                to_states = np.append(to_states, [0] * end_states.shape[0])
-            
+            to_states = []; from_states = []
+            for i in xrange(N):
+                if group_label == group_labels[i]:
+                    if boundary_mask[i] == SEQ_BEGIN:
+                        to_states.append(states[i])
+                        from_states.append(0)
+                    elif boundary_mask[i] == SEQ_END:
+                        to_states.append(0)
+                        from_states.append(states[i])
+                    else:                        
+                        to_states.append(states[i])
+                        from_states.append(states[i-1])
+                    
             for candidate_cluster in xrange(num_clusters):
                 temp_logp = 0
                 
@@ -367,20 +368,22 @@ class HMMSampler(BaseSampler):
                 temp_logp += np.log(trans_p_matrix[from_states, to_states]).sum()
 
                 # calculate the "prior"
-                n = 0
-                for cluster in new_group_cluster_dict.values():
-                    n += <int>(cluster == candidate_cluster)
+                n = cluster_count[candidate_cluster]
                 n -= <int>(old_cluster == candidate_cluster) # don't count itself
                     
                 temp_logp += log((n + 1.0) / (num_groups - 1 + num_clusters))
                 logp_grid[candidate_cluster] = temp_logp
                 
-            new_cluster = sample(a = range(num_clusters), p = lognormalize(logp_grid))
+            new_cluster = sample(a = all_clusters, p = lognormalize(logp_grid))
 
             # record the results
             new_group_cluster_dict[group_label] = new_cluster
             new_cluster_mask[(group_labels == group_label)] = new_cluster
-
+            # a trick to update the cluster count without recounting
+            cluster_count[old_cluster] -= <int>(new_cluster != old_cluster)
+            cluster_count[new_cluster] += <int>(new_cluster != old_cluster)
+        self.gpu_time += time() - a_time
+            
         return new_group_cluster_dict, new_cluster_mask
 
 
