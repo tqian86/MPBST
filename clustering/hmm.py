@@ -357,39 +357,46 @@ class GaussianHMMSampler(HMMSampler):
         """Infer the clusters of each group.
         """
         if self.num_clusters == 1: return self.group_cluster_dict, self.cluster_mask
-        group_cluster_dict = {}
-        cluster_mask = np.empty(self.N, dtype=np.int)
+        group_cluster_dict = copy.deepcopy(self.group_cluster_dict)
+        cluster_mask = np.copy(self.cluster_mask)
         
         # change the cluster of a group affects the transition probability only
         # so we only need to calculate that
         for group_label in self.group_label_set:
             logp_grid = np.empty(self.num_clusters)
             old_cluster = self.group_cluster_dict[group_label]
+
+            # retrieve bigram pairs belonging to this group
+            to_indices = np.where((self.group_labels == group_label) & (self.boundary_mask != self.SEQ_BEGIN))[0]
+            from_indices = to_indices - 1
+            
+            to_states = states[to_indices]
+            from_states = states[from_indices]
+            
+            begin_states = states[(self.group_labels == group_label) & (self.boundary_mask == self.SEQ_BEGIN)]
+            if len(begin_states) > 0:
+                from_states = np.append(from_states, [0] * begin_states.shape[0])
+                to_states = np.append(to_states, begin_states)
+            end_states = states[(self.group_labels == group_label) & (self.boundary_mask == self.SEQ_END)]
+            if len(end_states) > 0:
+                from_states = np.append(from_states, end_states)
+                to_states = np.append(to_states, [0] * end_states.shape[0])
+
+            cluster_count = Counter(group_cluster_dict.values()) # count up first
             for candidate_cluster in xrange(self.num_clusters):
 
                 # get the transition prob matrix corresponding to the target cluster
                 trans_p_matrix = trans_p_matrices[candidate_cluster]
                 
-                # retrieve bigram pairs belonging to this group
-                to_indices = np.where((self.group_labels == group_label) & (self.boundary_mask != self.SEQ_BEGIN))[0]
-                from_indices = to_indices - 1
-
-                to_states = states[to_indices]
-                from_states = states[from_indices]
-                
-                begin_states = states[(self.group_labels == group_label) & (self.boundary_mask == self.SEQ_BEGIN)]
-                from_states = np.append(from_states, [0] * begin_states.shape[0]).astype(np.int)
-                to_states = np.append(to_states, begin_states).astype(np.int)
-                end_states = states[(self.group_labels == group_label) & (self.boundary_mask == self.SEQ_END)]
-                from_states = np.append(from_states, end_states).astype(np.int)
-                to_states = np.append(to_states, [0] * end_states.shape[0]).astype(np.int)
-
                 # put the results into the first cell just as a placeholder
                 logp_grid[candidate_cluster] = np.log(trans_p_matrix[from_states, to_states]).sum()
                 
                 # calculate the "prior"
-                n = len([cluster for gl, cluster in self.group_cluster_dict.items() if cluster == candidate_cluster])
-                logp_grid[candidate_cluster] += np.log((n + 1.0) / (self.num_groups + self.num_clusters))
+                n = cluster_count[candidate_cluster]
+                # don't count itself
+                if old_cluster == candidate_cluster: n -= 1
+                
+                logp_grid[candidate_cluster] += np.log((n + 1.0) / (self.num_groups - 1 + self.num_clusters * 1))
                 
             new_cluster = sample(a = range(self.num_clusters), p = lognormalize(logp_grid))
 
@@ -538,8 +545,9 @@ class GaussianHMMSampler(HMMSampler):
 
             # calculate the probability of the clustering arrangement
             logprob_model += lgamma(self.num_clusters * 1) - lgamma(self.num_groups + self.num_clusters * 1)
+            cluster_count = Counter(group_cluster_dict.values())
             for cluster in xrange(self.num_clusters):
-                n = len([gl for gl, c in group_cluster_dict.items() if c == cluster])
+                n = cluster_count[cluster]
                 logprob_model += lgamma(n + 1) - lgamma(1)
             
             # calculate transition probabilities first
