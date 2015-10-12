@@ -339,28 +339,29 @@ class HMMSampler(BaseSampler):
         for group_label in self.group_label_set:
             logp_grid = np.empty(num_clusters)
             old_cluster = new_group_cluster_dict[group_label]
+
+            # retrieve bigram pairs belonging to this group
+            to_indices = np.where((group_labels == group_label) & (boundary_mask != SEQ_BEGIN))[0]
+            from_indices = to_indices - 1
+
+            to_states = states[to_indices]
+            from_states = states[from_indices]
+                
+            begin_states = states[(group_labels == group_label) & (boundary_mask == SEQ_BEGIN)]
+            if len(begin_states) > 0:
+                from_states = np.append(from_states, [0] * begin_states.shape[0])
+                to_states = np.append(to_states, begin_states)
+                
+            end_states = states[(group_labels == group_label) & (boundary_mask == SEQ_END)]
+            if len(end_states) > 0:
+                from_states = np.append(from_states, end_states)
+                to_states = np.append(to_states, [0] * end_states.shape[0])
+            
             for candidate_cluster in xrange(num_clusters):
                 temp_logp = 0
                 
                 # get the transition prob matrix corresponding to the target cluster
                 trans_p_matrix = trans_p_matrices[candidate_cluster]
-                
-                # retrieve bigram pairs belonging to this group
-                to_indices = np.where((group_labels == group_label) & (boundary_mask != SEQ_BEGIN))[0]
-                from_indices = to_indices - 1
-
-                to_states = states[to_indices]
-                from_states = states[from_indices]
-                
-                begin_states = states[(group_labels == group_label) & (boundary_mask == SEQ_BEGIN)]
-                if len(begin_states) > 0:
-                    from_states = np.append(from_states, [0] * begin_states.shape[0])
-                    to_states = np.append(to_states, begin_states)
-                
-                end_states = states[(group_labels == group_label) & (boundary_mask == SEQ_END)]
-                if len(end_states) > 0:
-                    from_states = np.append(from_states, end_states)
-                    to_states = np.append(to_states, [0] * end_states.shape[0])
 
                 # put the results into the first cell just as a placeholder
                 temp_logp += np.log(trans_p_matrix[from_states, to_states]).sum()
