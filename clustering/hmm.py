@@ -106,6 +106,29 @@ class HMMSampler(BaseSampler):
         self.uniq_states = np.linspace(1, self.num_states, self.num_states).astype(np.int64)
         self.SEQ_BEGIN, self.SEQ_END = 1, 2
         self.str_output_lines = []
+
+    def __str__(self):
+        """Return a readable string representation of the sampler.
+        """
+        s = '{0} with {1} states'.format(type(self).__name__, self.num_states)
+        if self.data is None:
+            return s + ' (no training data imported)'
+        else:
+            s += ' running on training data {0}'.format(self.source_filepath)
+            if self.seq_id:
+                s += 'with sequence id "{0}"'.format(self.seq_id)
+            if self.group:
+                s += ', group id "{0}" and {1} cluster(s)'.format(self.group, self.num_clusters)
+            return s
+
+    def __param_str__(self):
+        s = '{0}-k{1}'.format(type(self).__name__, self.num_states)
+        if self.data is not None:
+            if self.seq_id:
+                s += '-seqid_{0}'.format(self.seq_id)
+            if self.group:
+                s += '-group_{0}-clusters_{1}'.format(self.group, self.num_clusters)
+        return s
         
     def read_csv(self, filepath, obs_vars = ['obs'], seq_id = None, timestamp = None, group = None, num_clusters = 1, header = True):
         """Read data from a csv file and check for observations. 
@@ -289,6 +312,11 @@ class GaussianHMMSampler(HMMSampler):
             program_str = open(MPBST.__path__[0] + '/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
         
+    def __str__(self):
+        """Return a readable string representation of the sampler.
+        """
+        return HMMSampler.__str__(self)
+
     def read_csv(self, filepath, obs_vars = ['obs'], seq_id = None, timestamp = None, group = None, num_clusters = 1, header = True):
         """Read data from a csv file and set up means and covariance matrices for the Gaussian
         generative model.
