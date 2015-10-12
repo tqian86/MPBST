@@ -265,6 +265,7 @@ class HMMSampler(BaseSampler):
         self.setup_sample_output(filepath)
             
     @cython.boundscheck(False)
+    @cython.wraparound(False)
     def _infer_trans_p(self, np.ndarray[np.int_t, ndim=1] states):
         """Infer the transitional probabilities between states without OpenCL.
         """
@@ -317,12 +318,15 @@ class HMMSampler(BaseSampler):
         return trans_p_matrices
 
     @cython.boundscheck(False)
+    @cython.wraparound(False)
     def _infer_cluster(self, np.ndarray[np.int_t, ndim=1] states, trans_p_matrices):
         """Infer the clusters of each group.
         """
         if self.num_clusters == 1: return self.group_cluster_dict, self.cluster_mask
         cdef dict group_cluster_dict = self.group_cluster_dict
         cdef dict new_group_cluster_dict = copy.deepcopy(group_cluster_dict)
+        cdef dict from_states_dict = {}
+        cdef dict to_states_dict = {}
         cdef np.ndarray[np.int_t, ndim=1] new_cluster_mask = copy.deepcopy(self.cluster_mask)
         cdef np.ndarray[np.int_t, ndim=1] boundary_mask = self.boundary_mask
         cdef list from_states, to_states
@@ -339,25 +343,24 @@ class HMMSampler(BaseSampler):
         logp_grid = np.empty(num_clusters)
 
         a_time = time()    
-        # change the cluster of a group affects the transition probability only
-        # so we only need to calculate that
+        # get which bigrams belong to which group label in one pass
+        for i in xrange(N):
+            group_label = group_labels[i]
+            if group_label not in to_states_dict: to_states_dict[group_label] = []
+            if group_label not in from_states_dict: from_states_dict[group_label] = []
+            
+            if boundary_mask[i] == SEQ_BEGIN:
+                to_states_dict[group_label].append(states[i])
+                from_states_dict[group_label].append(0)
+            elif boundary_mask[i] == SEQ_END:
+                to_states_dict[group_label].append(0)
+                from_states_dict[group_label].append(states[i])
+            else:                        
+                to_states_dict[group_label].append(states[i])
+                from_states_dict[group_label].append(states[i-1])
+
         for group_label in self.group_label_set:
             old_cluster = new_group_cluster_dict[group_label]
-
-            # retrieve bigram pairs belonging to this group
-            to_states = []; from_states = []
-            for i in xrange(N):
-                if group_label == group_labels[i]:
-                    if boundary_mask[i] == SEQ_BEGIN:
-                        to_states.append(states[i])
-                        from_states.append(0)
-                    elif boundary_mask[i] == SEQ_END:
-                        to_states.append(0)
-                        from_states.append(states[i])
-                    else:                        
-                        to_states.append(states[i])
-                        from_states.append(states[i-1])
-                    
             for candidate_cluster in xrange(num_clusters):
                 temp_logp = 0
                 
@@ -365,7 +368,7 @@ class HMMSampler(BaseSampler):
                 trans_p_matrix = trans_p_matrices[candidate_cluster]
 
                 # put the results into the first cell just as a placeholder
-                temp_logp += np.log(trans_p_matrix[from_states, to_states]).sum()
+                temp_logp += np.log(trans_p_matrix[from_states_dict[group_label], to_states_dict[group_label]]).sum()
 
                 # calculate the "prior"
                 n = cluster_count[candidate_cluster]
