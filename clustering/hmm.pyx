@@ -329,6 +329,7 @@ class HMMSampler(BaseSampler):
         cdef dict to_states_dict = {}
         cdef np.ndarray[np.int_t, ndim=1] new_cluster_mask = copy.deepcopy(self.cluster_mask)
         cdef np.ndarray[np.int_t, ndim=1] boundary_mask = self.boundary_mask
+        #cdef np.ndarray[np.float_t, ndim=2] trans_p_matrix
         cdef list from_states, to_states
 
         #cdef np.ndarray[np.float_t, ndim = 1] logp_grid
@@ -342,7 +343,6 @@ class HMMSampler(BaseSampler):
         cluster_count = Counter(new_group_cluster_dict.values())
         logp_grid = np.empty(num_clusters)
 
-        a_time = time()    
         # get which bigrams belong to which group label in one pass
         for i in xrange(N):
             group_label = group_labels[i]
@@ -358,7 +358,7 @@ class HMMSampler(BaseSampler):
             else:                        
                 to_states_dict[group_label].append(states[i])
                 from_states_dict[group_label].append(states[i-1])
-
+        
         for group_label in self.group_label_set:
             old_cluster = new_group_cluster_dict[group_label]
             for candidate_cluster in xrange(num_clusters):
@@ -368,24 +368,29 @@ class HMMSampler(BaseSampler):
                 trans_p_matrix = trans_p_matrices[candidate_cluster]
 
                 # put the results into the first cell just as a placeholder
-                temp_logp += np.log(trans_p_matrix[from_states_dict[group_label], to_states_dict[group_label]]).sum()
-
+                #temp_logp += np.log(trans_p_matrix[from_states_dict[group_label], to_states_dict[group_label]]).sum()
+                for i in xrange(len(from_states_dict[group_label])):
+                    temp_logp += log(trans_p_matrix[from_states_dict[group_label][i],
+                                                    to_states_dict[group_label][i]])
+            
                 # calculate the "prior"
                 n = cluster_count[candidate_cluster]
                 n -= <int>(old_cluster == candidate_cluster) # don't count itself
                     
                 temp_logp += log((n + 1.0) / (num_groups - 1 + num_clusters))
                 logp_grid[candidate_cluster] = temp_logp
-                
+
             new_cluster = sample(a = all_clusters, p = lognormalize(logp_grid))
 
             # record the results
-            new_group_cluster_dict[group_label] = new_cluster
-            new_cluster_mask[(group_labels == group_label)] = new_cluster
-            # a trick to update the cluster count without recounting
-            cluster_count[old_cluster] -= <int>(new_cluster != old_cluster)
-            cluster_count[new_cluster] += <int>(new_cluster != old_cluster)
-        self.gpu_time += time() - a_time
+            if new_cluster != old_cluster:
+                new_group_cluster_dict[group_label] = new_cluster
+                for i in xrange(N):
+                    if group_labels[i] == group_label:
+                        new_cluster_mask[i] = new_cluster
+                # a trick to update the cluster count without recounting
+                cluster_count[old_cluster] -= 1#<int>(new_cluster != old_cluster)
+                cluster_count[new_cluster] += 1#<int>(new_cluster != old_cluster)
             
         return new_group_cluster_dict, new_cluster_mask
 
