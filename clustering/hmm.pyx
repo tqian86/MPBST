@@ -89,7 +89,7 @@ def wishart(int df, np.ndarray Sigma, size=None):
 class HMMSampler(BaseSampler):
 
     def __init__(self, int num_states, search = True, int search_tolerance = 100, cl_mode = False, cl_device = None,
-                 int sample_size = 1000, annealing = False, debug_mumble = False):
+                 int sample_size = 1000, annealing = False, debug_mumble = False, **kwargs):
         """Initialize the base HMM sampler.
         """
         BaseSampler.__init__(self,
@@ -113,6 +113,10 @@ class HMMSampler(BaseSampler):
         self.str_output_lines = []
         self.seq_id = None
         self.group = None
+
+        # define a self-transit transition matrix
+        self.no_trans_matrix = np.eye(num_states + 1)
+        self.no_trans_bias = kwargs.get('no_trans_bias', 0.0)
         
     def __str__(self):
         """Return a readable string representation of the sampler.
@@ -137,7 +141,7 @@ class HMMSampler(BaseSampler):
                 s += '-group_{0}-clusters_{1}'.format(self.group, self.num_clusters)
         return s
 
-    def read_csv(self, str filepath, list obs_vars = ['obs'], seq_id = None, timestamp = None, group = None, num_clusters = 1, header = True):
+    def read_csv(self, str filepath, list obs_vars = ['obs'], seq_id = None, timestamp = None, group = None, num_clusters = 1, header = True, **kwargs):
         """Read data from a csv file and check for observations. 
 
         Time series data are expected to be stored in columns, rather than rows of various lengths.
@@ -257,7 +261,14 @@ class HMMSampler(BaseSampler):
         cdef np.ndarray[np.int_t, ndim = 1] states
         states = np.random.randint(low = 1, high = self.num_states + 1, size = self.N).astype(np.int)
         self.states = states
-        
+
+        # get time intervals if available
+        if kwargs.get('time_interval') is None:
+            self.time_intervals = np.empty(self.N)
+            self.time_intervals.fill(np.Inf)
+        else:
+            self.time_intervals = self.original_data[kwargs.get('time_interval')].values
+            
         if self.cl_mode:
             self.d_obs = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
                                    hostbuf = np.array(self.data, dtype=np.float32, order='C'))
@@ -301,7 +312,7 @@ class HMMSampler(BaseSampler):
             
             pair_count = Counter(pairs)
             num_pairs = len(pairs)
-            
+
             # calculate the new parameters
             for state_from in uniq_states + [0]:
                 count_from_state = 0
@@ -327,6 +338,7 @@ class HMMSampler(BaseSampler):
         cdef dict new_group_cluster_dict = copy.deepcopy(group_cluster_dict)
         cdef dict from_states_dict = {}
         cdef dict to_states_dict = {}
+        cdef dict time_intervals_dict = {}
         cdef np.ndarray[np.int_t, ndim=1] new_cluster_mask = copy.deepcopy(self.cluster_mask)
         cdef np.ndarray[np.int_t, ndim=1] boundary_mask = self.boundary_mask
         #cdef np.ndarray[np.float_t, ndim=2] trans_p_matrix
@@ -336,7 +348,7 @@ class HMMSampler(BaseSampler):
         cdef np.ndarray group_labels = self.group_labels
         cdef int num_clusters = self.num_clusters, num_groups = self.num_groups, SEQ_BEGIN = self.SEQ_BEGIN, SEQ_END = self.SEQ_END
         cdef int old_cluster, candidate_cluster, new_cluster, cluster, n, i
-        cdef int N = self.N
+        cdef int N = self.N, from_state, to_state
         cdef float temp_logp
         cdef list all_clusters = range(num_clusters)
 
@@ -348,16 +360,20 @@ class HMMSampler(BaseSampler):
             group_label = group_labels[i]
             if group_label not in to_states_dict: to_states_dict[group_label] = []
             if group_label not in from_states_dict: from_states_dict[group_label] = []
+            if group_label not in time_intervals_dict: time_intervals_dict[group_label] = []
             
             if boundary_mask[i] == SEQ_BEGIN:
                 to_states_dict[group_label].append(states[i])
                 from_states_dict[group_label].append(0)
+                time_intervals_dict[group_label].append(np.Inf)
             elif boundary_mask[i] == SEQ_END:
                 to_states_dict[group_label].append(0)
                 from_states_dict[group_label].append(states[i])
+                time_intervals_dict[group_label].append(self.time_intervals[i])
             else:                        
                 to_states_dict[group_label].append(states[i])
                 from_states_dict[group_label].append(states[i-1])
+                time_intervals_dict[group_label].append(self.time_intervals[i])
         
         for group_label in self.group_label_set:
             old_cluster = new_group_cluster_dict[group_label]
@@ -366,13 +382,19 @@ class HMMSampler(BaseSampler):
                 
                 # get the transition prob matrix corresponding to the target cluster
                 trans_p_matrix = trans_p_matrices[candidate_cluster]
-
+                
                 # put the results into the first cell just as a placeholder
-                #temp_logp += np.log(trans_p_matrix[from_states_dict[group_label], to_states_dict[group_label]]).sum()
                 for i in xrange(len(from_states_dict[group_label])):
-                    temp_logp += log(trans_p_matrix[from_states_dict[group_label][i],
-                                                    to_states_dict[group_label][i]])
-            
+                    time_interval = time_intervals_dict[group_label][i]
+                    
+                    # note that this will be 0 if time_interval is np.Inf
+                    no_trans_weight = self.no_trans_bias ** time_interval
+
+                    from_state = from_states_dict[group_label][i]
+                    to_state = to_states_dict[group_label][i]
+                    temp_logp += log(no_trans_weight * self.no_trans_matrix[from_state, to_state] +
+                                     (1 - no_trans_weight) * trans_p_matrix[from_state, to_state])
+                        
                 # calculate the "prior"
                 n = cluster_count[candidate_cluster]
                 n -= <int>(old_cluster == candidate_cluster) # don't count itself
@@ -411,7 +433,7 @@ class GaussianHMMSampler(HMMSampler):
 
     def __init__(self, int num_states, search = True, int search_tolerance = 100,
                  cl_mode = False, cl_device = None,
-	         int sample_size = 1000, annealing = False, debug_mumble = False):
+	         int sample_size = 1000, annealing = False, debug_mumble = False, **kwargs):
         """Initialize the base HMM sampler.
         """
         HMMSampler.__init__(self, num_states = num_states,
@@ -419,7 +441,7 @@ class GaussianHMMSampler(HMMSampler):
                             cl_mode = cl_mode, cl_device = cl_device,
                             sample_size = sample_size,
                             annealing = annealing,
-                            debug_mumble = debug_mumble)
+                            debug_mumble = debug_mumble, **kwargs)
 
         if cl_mode:
             global cl
@@ -428,7 +450,7 @@ class GaussianHMMSampler(HMMSampler):
             program_str = open(MPBST.__path__[0] + '/clustering/kernels/gaussian_hmm_cl.c', 'r').read()
             self.cl_prg = cl.Program(self.ctx, program_str).build()
         
-    def read_csv(self, str filepath, list obs_vars = ['obs'], seq_id = None, timestamp = None, group = None, num_clusters = 1, header = True):
+    def read_csv(self, str filepath, list obs_vars = ['obs'], seq_id = None, timestamp = None, group = None, num_clusters = 1, header = True, **kwargs):
         """Read data from a csv file and set up means and covariance matrices for the Gaussian
         generative model.
         """
@@ -436,7 +458,7 @@ class GaussianHMMSampler(HMMSampler):
         self.obs_vars = obs_vars; self.flat_obs_vars = flat_obs_vars
 
         HMMSampler.read_csv(self, filepath, obs_vars = flat_obs_vars, seq_id = seq_id,
-                            timestamp = timestamp, group = group, num_clusters = num_clusters, header = header)
+                            timestamp = timestamp, group = group, num_clusters = num_clusters, header = header, **kwargs)
 
         cdef long s
 
@@ -483,22 +505,28 @@ class GaussianHMMSampler(HMMSampler):
         # state probabilities need to be interated over
         cdef list trans_p_matrices = self.trans_p_matrices
         cdef int is_beginning, is_end, cluster
-        cdef np.ndarray[np.float_t, ndim=2] trans_p_matrix
+        cdef np.ndarray[np.float_t, ndim=2] trans_p_matrix, target_trans_p_matrix
         
         for nth in xrange(N):
             nth_boundary_mask = boundary_mask[nth]
             cluster = self.cluster_mask[nth]
-            trans_p_matrix = trans_p_matrices[cluster]
-
+            time_interval = self.time_intervals[nth]
+            target_trans_p_matrix = trans_p_matrices[cluster]
+            if self.no_trans_bias == 0.0:
+                no_trans_weight = 0
+            else:
+                no_trans_weight = self.no_trans_bias ** time_interval
+            trans_p_matrix = no_trans_weight * self.no_trans_matrix + (1 - no_trans_weight) * target_trans_p_matrix
+            
             for state_idx in xrange(num_states):
                 state = uniq_states[state_idx]
                 if nth_boundary_mask == SEQ_BEGIN:
-                    state_logp[state_idx] = log(trans_p_matrix[0, state])
+                    state_logp[state_idx] = log(target_trans_p_matrix[0, state])
                 else:
                     state_logp[state_idx] = log(trans_p_matrix[new_states[nth - 1], state])
 
                 if nth_boundary_mask == SEQ_END:
-                    state_logp[state_idx] += log(trans_p_matrix[state, 0])
+                    state_logp[state_idx] += log(target_trans_p_matrix[state, 0])
                 else:
                     state_logp[state_idx] += log(trans_p_matrix[state, new_states[nth + 1]])
 
