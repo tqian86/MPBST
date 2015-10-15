@@ -18,6 +18,8 @@ parser.add_argument("--seqid", type=str, help = "optinally specify a variable id
 parser.add_argument("--clusters", "-c", type = int, help = "the number of clusters")
 parser.add_argument("--group", type=str, help = "optinally specify the grouping variable where each unique value refers to a group and one or more groups may belong to the same cluster.")
 parser.add_argument("--timestamp", type=str, default=None, help = "optinally specify a timestamp variable that re-orders the rows in the input csv file in an ascending order. If sequence id is also provided, this orders rows within each sequence.")
+parser.add_argument("--interval", type=str, default=None, help = "optinally specify an interval variable that specifies the amount of time (in arbitrary unit) passed between the previous observation and the current observation in a sequence.")
+parser.add_argument("--notransbias", type=float, default=None, help = "optinally specify a bias for weighting the stationary transition matrix more heavily. Should be between 0 and 1. Larger values will result in relatively stationary transition matrices.")
 parser.add_argument("--search", action="store_true", help = "use stochastic search instead of Gibbs sampling")
 parser.add_argument("--opencl", action="store_true", help = "use opencl optimization")
 parser.add_argument("--debug", "-d", action="store_true", help = "turn on debug mode")
@@ -30,7 +32,7 @@ if bool(args.group) ^ bool(args.clusters):
     parser.error('--group and --cluster must be given together')
 
 if __name__ == '__main__':
-    hs = GaussianHMMSampler(num_states = args.states, sample_size = args.iters, search = args.search, cl_mode = args.opencl, debug_mumble = args.debug, search_tolerance = args.t)
-    hs.read_csv(args.data, obs_vars = args.outcome, seq_id = args.seqid, timestamp = args.timestamp, group = args.group, num_clusters = args.clusters)
+    hs = GaussianHMMSampler(num_states = args.states, sample_size = args.iters, search = args.search, cl_mode = args.opencl, debug_mumble = args.debug, search_tolerance = args.t, no_trans_bias = args.notransbias)
+    hs.read_csv(args.data, obs_vars = args.outcome, seq_id = args.seqid, timestamp = args.timestamp, group = args.group, num_clusters = args.clusters, time_interval = args.interval)
     gt, tt = hs.do_inference()
     print(gt, tt)
