@@ -198,6 +198,30 @@ class HMMSampler(BaseSampler):
             timestamp = '_time_stamp_'
             self.original_data['_time_stamp_'] = range(self.N)
 
+        # create boundary markers if seq_id is supplied
+        if seq_id is None:
+            self.original_data.sort(columns = timestamp, inplace=True)
+            self.data = self.original_data[obs_vars]
+            self.boundary_mask = np.zeros(self.N, dtype=np.int32)
+            self.boundary_mask[0] = self.SEQ_BEGIN
+            self.boundary_mask[-1] = self.SEQ_END
+        else:
+            if seq_id not in self.original_data:
+                print('The specified sequence ID "{0}" cannot be found in the data'.format(seq_id), file = sys.stderr)
+                sys.exit(0)
+            if timestamp not in self.original_data:
+                print('The specified timestamp "{0}" cannot be found in the data'.format(timestamp), file = sys.stderr)
+                sys.exit(0)
+            self.seq_id = seq_id
+            self.original_data.sort(columns = [seq_id, timestamp], inplace=True)
+            self.data = self.original_data[obs_vars]
+            self.boundary_mask = np.zeros(self.N, dtype=np.int32)
+            rle_values, rle_lengths = zip(*[(k, len(list(g))) for k, g in itertools.groupby(self.original_data[seq_id])])
+            boundary_begins = np.array(rle_lengths).cumsum() - rle_lengths
+            boundary_ends = np.array(rle_lengths).cumsum() - 1
+            self.boundary_mask[boundary_begins] = self.SEQ_BEGIN
+            self.boundary_mask[boundary_ends] = self.SEQ_END
+
         def _make_trans_p_matrix(num_states):
             trans_p_matrix = np.random.random((num_states+1, num_states+1))
             return trans_p_matrix / trans_p_matrix.sum(axis=1)
@@ -226,30 +250,7 @@ class HMMSampler(BaseSampler):
         for group_label in self.group_label_set:
             self.cluster_mask[(self.group_labels == group_label)] = self.group_cluster_dict[group_label]
             
-        # create boundary markers if seq_id is supplied
-        if seq_id is None:
-            self.original_data.sort(columns = timestamp, inplace=True)
-            self.data = self.original_data[obs_vars]
-            self.boundary_mask = np.zeros(self.N, dtype=np.int32)
-            self.boundary_mask[0] = self.SEQ_BEGIN
-            self.boundary_mask[-1] = self.SEQ_END
-        else:
-            if seq_id not in self.original_data:
-                print('The specified sequence ID "{0}" cannot be found in the data'.format(seq_id), file = sys.stderr)
-                sys.exit(0)
-            if timestamp not in self.original_data:
-                print('The specified timestamp "{0}" cannot be found in the data'.format(timestamp), file = sys.stderr)
-                sys.exit(0)
-            self.seq_id = seq_id
-            self.original_data.sort(columns = [seq_id, timestamp], inplace=True)
-            self.data = self.original_data[obs_vars]
-            self.boundary_mask = np.zeros(self.N, dtype=np.int32)
-            rle_values, rle_lengths = zip(*[(k, len(list(g))) for k, g in itertools.groupby(self.original_data[seq_id])])
-            boundary_begins = np.array(rle_lengths).cumsum() - rle_lengths
-            boundary_ends = np.array(rle_lengths).cumsum() - 1
-            self.boundary_mask[boundary_begins] = self.SEQ_BEGIN
-            self.boundary_mask[boundary_ends] = self.SEQ_END
-            
+        # generate initial states
         self.states = np.random.randint(low = 1, high = self.num_states + 1, size = self.N).astype(np.int32)
 
         if self.cl_mode:
