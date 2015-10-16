@@ -116,7 +116,9 @@ class HMMSampler(BaseSampler):
 
         # define a self-transit transition matrix
         self.no_trans_matrix = np.eye(num_states + 1)
-        self.no_trans_bias = kwargs.get('no_trans_bias', 0.0)
+        self.no_trans_bias = kwargs.get('no_trans_bias')
+        if self.no_trans_bias is None:
+            self.no_trans_bias = 0.0
         
     def __str__(self):
         """Return a readable string representation of the sampler.
@@ -283,43 +285,60 @@ class HMMSampler(BaseSampler):
         cdef list trans_p_matrices = [None] * len(self.trans_p_matrices)
         cdef tuple trans_p_matrix_shape = self.trans_p_matrices[0].shape
         cdef np.ndarray[np.float_t, ndim=2] new_trans_p_matrix
-        cdef int cluster, state_from, state_to
         cdef int num_clusters = self.num_clusters, num_states = self.num_states
         cdef int SEQ_BEGIN = self.SEQ_BEGIN, SEQ_END = self.SEQ_END
         cdef list uniq_states = list(self.uniq_states)
         cdef np.ndarray[np.int_t, ndim=1] to_indices, from_indices
         cdef np.ndarray[np.int_t, ndim=1] cluster_mask = self.cluster_mask, boundary_mask = self.boundary_mask
-        cdef int pair_idx, num_pairs, count_from_state
+        cdef int count_from_state
+
+        cdef int cluster, n, to_state, from_state, N = self.N
+        cdef float trans_bias_weight, no_trans_bias = self.no_trans_bias
+        cdef np.ndarray[np.float_t, ndim = 1] time_intervals = self.time_intervals
+        cdef dict bigram_ec_dict = {}
         
+        # get which bigrams belong to which clusters in one pass
+        for n in xrange(N):
+            cluster = cluster_mask[n]
+            if cluster not in bigram_ec_dict: bigram_ec_dict[cluster] = {}
+            
+            if boundary_mask[n] == SEQ_BEGIN:
+                to_state = states[n]
+                from_state = 0
+                trans_bias_weight = 1 - pow(no_trans_bias, np.Inf)
+            elif boundary_mask[n] == SEQ_END:
+                to_states = 0
+                from_state = states[n]
+                trans_bias_weight = 1 - min(no_trans_bias ** time_intervals[n], 0.9999999)
+            else:                        
+                to_state = states[n]
+                from_state = states[n-1]
+                trans_bias_weight = 1 - min(no_trans_bias ** time_intervals[n], 0.9999999)
+                
+            if (from_state, to_state) in bigram_ec_dict[cluster]:
+                bigram_ec_dict[cluster][(from_state, to_state)] += trans_bias_weight
+            else:
+                bigram_ec_dict[cluster][(from_state, to_state)] = trans_bias_weight
+
+                
         for cluster in xrange(num_clusters):
             
             # copy the current transition prob matrix; this is needed for search mode
             new_trans_p_matrix = np.empty(trans_p_matrix_shape)
             new_trans_p_matrix[:] = self.trans_p_matrices[cluster][:]
 
-            # retrieve bigram pairs belonging to this group
-            to_indices = np.where((cluster_mask == cluster) & (boundary_mask != SEQ_BEGIN))[0]
-            from_indices = to_indices - 1
-            
-            # make bigram pairs for easier counting
-            pairs = zip(states[from_indices], states[to_indices])
-
-            # add also pairs made up by boundary marks 
-            begin_states = states[(cluster_mask == cluster) & (boundary_mask == SEQ_BEGIN)]
-            pairs.extend(zip([0] * begin_states.shape[0], begin_states))
-            end_states = states[(cluster_mask == cluster) & (boundary_mask == SEQ_END)]
-            pairs.extend(zip(end_states, [0] * end_states.shape[0]))
-            
-            pair_count = Counter(pairs)
-            num_pairs = len(pairs)
+            if cluster in bigram_ec_dict:
+                bigram_count = Counter(bigram_ec_dict[cluster])
+            else:
+                bigram_count = Counter({})
 
             # calculate the new parameters
-            for state_from in uniq_states + [0]:
+            for from_state in uniq_states + [0]:
                 count_from_state = 0
-                for pair_idx in xrange(num_pairs):
-                    if pairs[pair_idx][0] == state_from: count_from_state += 1
-                for state_to in uniq_states + [0]:
-                    new_trans_p_matrix[state_from, state_to] = (pair_count[(state_from, state_to)] + 1) / (count_from_state + (1 + num_states) * 1)
+                for bigram in bigram_count.keys():
+                    if bigram[0] == from_state: count_from_state += bigram_count[bigram]
+                for to_state in uniq_states + [0]:
+                    new_trans_p_matrix[from_state, to_state] = (bigram_count[(from_state, to_state)] + 1) / (count_from_state + (1 + num_states) * 1)
 
             new_trans_p_matrix[0, 0] = 0
             new_trans_p_matrix[0] = new_trans_p_matrix[0] / new_trans_p_matrix[0].sum()
@@ -388,7 +407,7 @@ class HMMSampler(BaseSampler):
                     time_interval = time_intervals_dict[group_label][i]
                     
                     # note that this will be 0 if time_interval is np.Inf
-                    no_trans_weight = self.no_trans_bias ** time_interval
+                    no_trans_weight = min(self.no_trans_bias ** time_interval, 0.9999999)
 
                     from_state = from_states_dict[group_label][i]
                     to_state = to_states_dict[group_label][i]
@@ -515,7 +534,7 @@ class GaussianHMMSampler(HMMSampler):
             if self.no_trans_bias == 0.0:
                 no_trans_weight = 0
             else:
-                no_trans_weight = self.no_trans_bias ** time_interval
+                no_trans_weight = min(self.no_trans_bias ** time_interval, 0.9999999)
             trans_p_matrix = no_trans_weight * self.no_trans_matrix + (1 - no_trans_weight) * target_trans_p_matrix
             
             for state_idx in xrange(num_states):
